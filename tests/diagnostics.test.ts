@@ -12,6 +12,7 @@ import {normalizeContext} from "@earendil-works/pi-ai";
 import {backendCode} from "../src/backends/claude-code/index.ts";
 import {getClaudeStatus} from "../src/backends/claude-code/claude-process.ts";
 import {catalogCache, Failure} from "../src/server/http.ts";
+import {useHome, writeSettings} from "./helpers.ts";
 
 test("backend errors are classified into specific codes", () => {
   assert.equal(backendCode('API Error: 529 {"type":"overloaded_error"}'), "overloaded");
@@ -45,7 +46,9 @@ test("status diagnostics include the CLI exit code and stderr tail", async t => 
   t.after(() => rm(dir, {recursive: true, force: true}));
   const command = join(dir, "claude");
   await writeFile(command, "#!/bin/sh\necho 'boom from stderr' >&2\nexit 3\n", {mode: 0o700});
-  const status = await getClaudeStatus({A_TETHER_CLAUDE: command});
+  useHome(t, dir);
+  await writeSettings(dir, {server: {claude: command}});
+  const status = await getClaudeStatus({});
   assert.equal(status.diagnostic, true);
   assert.match(status.detail!, /exit 3/);
   assert.match(status.detail!, /boom from stderr/);
@@ -75,8 +78,9 @@ for await (const line of createInterface({input:process.stdin})) {
   const port = (socket.address() as {port: number}).port;
   await new Promise<void>(resolve => socket.close(() => resolve()));
   const token = randomUUID();
+  await writeSettings(dir, {token, server: {port, claude: command}});
   const child = spawn(process.execPath, ["--experimental-transform-types", "src/server.ts"], {
-    env: {PATH: process.env.PATH, HOME: dir, TMPDIR: dir, A_TETHER_TOKEN: token, A_TETHER_PORT: String(port), A_TETHER_CLAUDE: command},
+    env: {PATH: process.env.PATH, HOME: dir, TMPDIR: dir},
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exited = once(child, "exit");

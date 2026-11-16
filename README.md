@@ -1,72 +1,133 @@
-# A-tether v0.1
+# A-tether
 
-在 A 上用 Pi 开发 A 的本地项目，经 SSH 隧道借用 C 上已登录的 Claude Code。Pi 在 A 管理会话、执行工具；C 启动单轮 Claude 进程，并在每轮结束后清理资源。
+在电脑 A 上用 [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 开发 A 的本地项目，模型借用电脑 C 上已登录的 Claude Code。Pi 在 A 管理会话、执行工具；C 每轮启动一个 Claude 进程，结束后清理。A 和 C 也可以是同一台电脑。
 
-**数据边界**　Pi 放入上下文的代码、工具定义、工具结果和对话会发送到 C，再进入模型服务。Claude 登录凭据由 C 上的官方 CLI 使用。A-tether 服务打印启动状态和监听端口；请求失败时在 stderr 输出一行诊断，包含时间、请求 ID 前 8 位、错误码，以及 Claude Code 报错和 stderr 末尾（截断到 500 字符）。日志不记录对话内容、工具参数或令牌。
+**数据边界**　Pi 放入上下文的代码、工具定义、工具结果和对话会发送到 C，再进入模型服务。Claude 登录凭据只由 C 上的官方 CLI 使用。C 端服务只打印启动状态和监听端口（第一次启动时另外打印一次新生成的令牌）；请求失败时在终端输出一行诊断（时间、请求 ID 前 8 位、错误码、Claude Code 报错末尾），不记录对话内容、工具参数或令牌。
 
-## 两台电脑如何配置
+## 准备
 
-按 [A 和 C 配置速查](docs/setup.md) 操作：先在 C 用 `npx -y @a-tether/server` 启动服务，再在 A 建立 SSH 隧道，并从 A 的开发项目目录运行 `npx -y @a-tether/pi`。A 上需要先自行安装 Pi；也可用 `pi install npm:@a-tether/pi` 把插件持久装入 Pi。
+- 两台电脑都装好 Node.js 22.19 或更高版本，系统为 macOS 或 Linux。
+- C：已登录 Claude Code，`claude auth status` 显示已登录。
+- A：已安装 Pi（A-tether 不会替你安装）：`npm install -g @earendil-works/pi-coding-agent`，确认 `pi --version` 可以运行。
+- 一种把 A 的本机端口转发到 C 的方式。推荐 SSH 本地端口转发，这需要 C 开着 SSH 服务。
 
-## 项目结构
-
-| 路径 | 职责 |
-| --- | --- |
-| `src/frontends/pi/` | Pi 插件（`extension.ts`）和 `a-tether-pi` 启动器（`cli.ts`）。其他前端可放在同级目录。 |
-| `src/client/` | A 端共用的 HTTP 请求、回环地址检查和服务认证。 |
-| `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期。 |
-| `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换与只读工具目录。 |
-| `src/shared/` | 两端共用的 v0.1 协议、事件编码和错误码。 |
-| `packages/` | 两个 npm 包的清单和说明：`server` 发布为 `@a-tether/server`（C 端，命令 `a-tether-server`），`pi` 发布为 `@a-tether/pi`（A 端，命令 `a-tether-pi`）。`dist/` 由构建生成。 |
-| `scripts/build.mjs` | 用 `tsconfig.build.json` 把 `src` 编译成 JS，并组装两个包。 |
-
-新后端实现 [Backend 接口](src/backends/backend.ts)，在 [C 端入口](src/server.ts) 选用。新前端可复用 HTTP 客户端并映射 v0.1 的消息和事件。当前协议沿用 Pi 的消息结构，服务每次启动加载一个后端。
-
-## 打包与发布
+## 第 1 步：在 C 上启动服务
 
 ```sh
-npm run build        # 编译并生成 packages/*/dist，版本号取根 package.json
-npm run pack:dry     # 构建并列出两个包将发布的文件
+npx -y @a-tether/server
 ```
 
-两个包同版本发布，由 GitHub Actions 自动完成：
+第一次启动时，服务会生成一个令牌，保存到 C 的 `~/.a-tether/settings.json`，并打印一行给 A 用的命令：
 
-1. 本地先跑 `npm run test:live`（CI 没有 Claude 账户，不跑真实验收）。
-2. `npm version patch`（或 `minor`），更新根 `package.json` 并打 `vX.Y.Z` tag。
-3. `git push --follow-tags`。`publish.yml` 校验 tag 与版本一致，运行检查、测试和构建，再用 npm Trusted Publishing 发布两个包。已发布的版本会跳过，失败后可直接重跑。
+```text
+已生成 A-tether 令牌，保存在 ~/.a-tether/settings.json。
+在 A 端电脑上运行一次下面这行（同一台电脑上使用 Pi 无需运行）：
 
-`ci.yml` 在推送到 main 和 PR 时运行检查、测试和打包预览。
+  npx -y @a-tether/pi login 3f9a…（64 位令牌）
+```
 
-首次发布需手动完成：`npm login` 后运行 `npm run build`、`npm publish ./packages/server`、`npm publish ./packages/pi`。然后在 npmjs.com 上为两个包分别配置 Trusted Publisher（GitHub Actions，仓库 `SandyKidYao/a-tether`，workflow `publish.yml`，environment `npm`），并在 GitHub 仓库中创建名为 `npm` 的 Environment，可设置人工审批。
+复制这行命令，第 3 步要用。以后再启动会直接沿用这个令牌，不再显示。忘了令牌时，在 C 上运行 `npx -y @a-tether/server token` 再看一次。
 
-`@a-tether/pi` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
+服务默认监听 `127.0.0.1:7310`。保持这个终端运行，按 Ctrl+C 停止。长期使用可以全局安装：`npm install -g @a-tether/server`，之后直接运行 `a-tether-server`。
 
-## 复验
+## 第 2 步：在 A 上建立到 C 的端口转发
 
-在 A-tether 源码目录运行。常规测试使用本地测试 CLI，不需要 Claude 账户。真实验收使用已配置的隧道和 C 的账户额度，在独立的临时 A 项目中运行。
+把 `user@C` 换成你的 SSH 用户名和 C 的主机名或 IP。首次连接时核对主机密钥指纹。保持这个终端运行。
 
 ```sh
-npm run check
-npm test
-npm run test:live
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:7310:127.0.0.1:7310 user@C
 ```
 
-真实验收先检查 Pi 收到文本增量，再随机生成一行内容，让模型调用 read 读取、edit 加前缀、bash 执行 pwd 与 cat。脚本核对工具顺序、文件内容、实际工作目录和模型最终回复。完成后删除临时项目。
+用其他端口转发工具时，把 A 的 `127.0.0.1:7310` 转发到 C 的 `127.0.0.1:7310` 即可。A 这边用的端口不是 7310 时，在 A 的 settings.json 里设置 `client.url`（见下文「配置文件」）。
 
-本次开发验收在同一台 Mac 上用独立进程和目录模拟 A、C，使用 OpenSSH 客户端及服务端、真实 Pi 和真实 Claude 账户。三种工具调用及最终回复均通过。断开正在执行请求的 SSH 隧道后，Pi 显示连接中断，对应的 Claude 进程退出。另用离线测试覆盖取消、临时文件清理和日志脱敏。跨物理机器和 Windows 组合仍待验证。
+## 第 3 步：在 A 上配置令牌（只需一次）
+
+粘贴第 1 步打印的那行命令：
+
+```sh
+npx -y @a-tether/pi login <令牌>
+```
+
+令牌保存在 A 的 `~/.a-tether/settings.json`，以后换终端、重启电脑都不用再配。
+
+## 第 4 步：在 A 上使用 Pi
+
+把插件装进 Pi（只需一次），之后在项目目录里直接运行 `pi`：
+
+```sh
+pi install npm:@a-tether/pi
+cd /path/to/your/project
+pi
+```
+
+在 Pi 里用 `/model` 选择 A-tether 的模型。
+
+也可以不安装插件，每次用 `npx -y @a-tether/pi` 启动带插件的 Pi，它默认选用 `a-tether/default`。其余参数原样传给 Pi，例如 `npx -y @a-tether/pi --model a-tether/claude-opus-5-5`。
+
+**成功标志**：在 Pi 中运行 `/a-tether-status`，显示「C 上的 Claude Code 已登录」；再发送一句「只回复 OK」，能收到回复。按 Esc 可以取消当前请求。
+
+## A 和 C 是同一台电脑
+
+跳过第 2、3 步：运行 `npx -y @a-tether/server` 后，另开一个终端直接运行 `pi` 或 `npx -y @a-tether/pi`。两端读的是同一个 settings.json，服务生成的令牌插件直接就能用。
+
+## 配置文件
+
+两端都只读 `~/.a-tether/settings.json`，所有字段都可以省略。服务生成令牌或运行 `login` 时，会把文件权限设为 600、目录设为 700，只有你自己能读；手动创建这个文件时请同样设置。
+
+```json
+{
+  "token": "由服务生成，或由 login 写入",
+  "server": { "host": "127.0.0.1", "port": 7310, "claude": "/usr/local/bin/claude", "allowUsageCredits": false },
+  "client": { "url": "http://127.0.0.1:7310", "pi": "/usr/local/bin/pi" }
+}
+```
+
+| 字段 | 用在 | 说明 | 默认值 |
+| --- | --- | --- | --- |
+| `token` | 两端 | 两端必须相同。C 首次启动时生成，A 用 `login` 写入。 | 无 |
+| `server.host` | C | 服务监听的地址。 | `127.0.0.1` |
+| `server.port` | C | 服务监听的端口。 | `7310` |
+| `server.claude` | C | Claude Code CLI 的路径，服务进程的 PATH 里找不到 `claude` 时填写绝对路径。 | `claude` |
+| `server.allowUsageCredits` | C | Claude 账户开始使用超额计费额度时是否继续。为 `false` 时中止请求，避免产生额外费用。 | `false` |
+| `client.url` | A | Pi 连接的地址，形如 `http://127.0.0.1:7310`。 | `http://127.0.0.1:` 加 `server.port` |
+| `client.pi` | A | `npx -y @a-tether/pi` 使用的 Pi 路径，Pi 不在 PATH 里时填写绝对路径。 | 在 PATH 中查找 |
+
+- `token`、`server.host`、`server.port` 改后需要重启服务；`server.claude`、`server.allowUsageCredits` 在服务下一次调用 Claude 时生效。
+- A 端的 `token`、`client.url` 在 Pi 的下一次请求时生效，不用重启 Pi；`client.pi` 在下次运行 `npx -y @a-tether/pi` 时生效。
+- 文件写错（不是合法 JSON、字段类型不对）时，服务拒绝启动，Pi 报错，都会指出出错的字段。文件不会被自动覆盖。
+- **监听局域网地址**：把 `server.host` 设成 `0.0.0.0` 或局域网 IP 后，A 可以不经端口转发，用 `client.url` 直接连接 C。但令牌会以明文 HTTP 在局域网里传输，同一网络中的设备都能尝试连接，服务启动时也会提醒这一点。只在可信网络里这样用。
+- **一台电脑两种身份**：同一台电脑既用 `login` 连接别的 C，又在本机启动服务时，两端共用同一个 `token`，本机服务会沿用 `login` 写入的令牌。
+
+**从 0.1.0 升级**：`A_TETHER_TOKEN`、`A_TETHER_URL`、`A_TETHER_PORT`、`A_TETHER_CLAUDE`、`A_TETHER_PI` 这几个环境变量不再生效，旧的 `~/.config/a-tether/token` 也不再读取。在 C 上启动新版服务会生成新令牌，按提示在 A 上重新 `login` 一次即可。
 
 ## 故障排查
 
-| 现象 | 检查方法 |
-| --- | --- |
-| Pi 连接中断 | 检查 C 服务和 SSH 终端；A 的 URL 端口要等于 `-L` 左侧端口。隧道重建后手动重发。 |
-| 认证失败 | 在启动 Pi 的终端检查令牌变量已设置。若 C 更新了令牌，两端均需重新加载。 |
-| 找不到 CLI 或未登录 | 在启动服务的 C 账户运行 `claude auth status`；若 PATH 不同，可设置 `A_TETHER_CLAUDE` 为 C 上的绝对路径后重启。 |
-| 无模型目录或后端错误 | 先看 C 端服务控制台中对应请求 ID 的诊断行。检查 C 能访问模型服务、CLI 可正常运行。检查 C 是否设置了自定义后端地址或非 Claude 登录认证变量。 |
-| 模型服务繁忙 | 上游过载或返回 5xx，稍后重试。C 端日志会显示原始报错。 |
-| 超出上下文长度 | 在 Pi 中压缩上下文，或减少图片和工具输出。 |
-| C 日志出现 `stale-catalog` | 刷新模型目录时 `claude auth status` 超时或失败，服务继续使用上次的目录，10 秒后重试。频繁出现时检查 C 的负载和 CLI。 |
-| 额度或速率限制 | 在 C 的 Claude Code 中查看账户用量。 |
-| 请求超限 | 单次 JSON 请求上限 32 MiB。可在 Pi 中压缩上下文或减少图片和工具输出。 |
+先在 Pi 中运行 `/a-tether-status`，它会显示具体原因。
 
-仅支持回环 HTTP 和 SSH 本地端口转发。模型请求最长五分钟，每轮重新创建 worker，工具密集的任务会产生额外启动开销。服务退出时用 Ctrl+C 或 SIGTERM 触发清理。Claude CLI 的调用方式见 [协议说明](docs/protocol-v0.1.md)。
+| 现象 | 处理 |
+| --- | --- |
+| 「还没有配置令牌」 | 在 C 上运行 `npx -y @a-tether/server token`，把它打印的命令拿到 A 上运行。 |
+| 「令牌与 C 端不一致」 | 同上，重新 `login`。C 的 settings.json 被删除或改过令牌后会出现这个提示。 |
+| 「连接中断」 | 检查 C 的服务终端和 A 的端口转发是否还在运行；A 的 `client.url` 端口要等于转发在 A 上的端口。转发恢复后在 Pi 里重发。 |
+| `/model` 提示 `Could not refresh a-tether` | 同上，用 `/a-tether-status` 查看具体原因。 |
+| C 上找不到 Claude Code 或未登录 | 在运行服务的 C 账户里运行 `claude auth status`。PATH 不同时，在 C 的 settings.json 里设置 `server.claude` 为绝对路径，然后重启服务。 |
+| 后端错误或无模型目录 | 看 C 服务终端里对应请求 ID 的诊断行。检查 C 能访问模型服务、`claude` 能正常运行，以及 C 是否设置了自定义后端地址或非 Claude 登录的认证变量。 |
+| 模型服务繁忙 | 上游过载或返回 5xx，稍后重试。 |
+| 额度、速率或计费限制 | 在 C 的 Claude Code 里查看账户用量。需要使用超额额度时，把 `server.allowUsageCredits` 设为 `true`。 |
+| 超出上下文长度或请求超限 | 在 Pi 中压缩上下文，或减少图片和工具输出。单次请求上限 32 MiB。 |
+| C 日志出现 `stale-catalog` | 刷新模型目录时 `claude auth status` 超时或失败，服务继续使用上次的目录，10 秒后重试。频繁出现时检查 C 的负载和 CLI。 |
+
+## 已知限制
+
+- 单次模型请求最长五分钟。每轮都会重新启动 Claude 进程，工具调用多的任务会有额外的启动开销。
+- 跨两台电脑验证过远程桌面工具提供的端口转发；SSH 隧道目前只在同一台 Mac 上用独立进程验证过。Windows 不在支持范围内。
+- 停止服务请用 Ctrl+C 或 SIGTERM，服务会清理正在运行的 Claude 进程和临时文件。
+
+## 开发
+
+参与开发 A-tether 本身，见 [开发说明](docs/dev/development.md)、[发布流程](docs/dev/release.md) 和 [协议说明](docs/protocol-v0.1.md)。
+
+## 许可
+
+[MIT](LICENSE)

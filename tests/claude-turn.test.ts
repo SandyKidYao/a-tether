@@ -7,6 +7,7 @@ import {spawnSync} from "node:child_process";
 import {normalizeContext} from "@earendil-works/pi-ai";
 import {streamClaudeCode} from "../src/backends/claude-code/claude-turn.ts";
 import {api, defaultUrl, providerId} from "../src/shared/protocol.ts";
+import {useHome, writeSettings} from "./helpers.ts";
 
 test("the MCP catalog can list a bash schema but cannot run it", async t=>{
   const dir=await mkdtemp(join(tmpdir(),"tether-schema-"));
@@ -44,12 +45,8 @@ for(const item of [
   {type:"result",subtype:"error_max_turns",is_error:true}
 ]) console.log(JSON.stringify(item));
 `,{mode:0o700});
-  const previous=process.env.A_TETHER_CLAUDE;
-  process.env.A_TETHER_CLAUDE=command;
-  t.after(()=>{
-    if(previous===undefined) delete process.env.A_TETHER_CLAUDE;
-    else process.env.A_TETHER_CLAUDE=previous;
-  });
+  useHome(t,dir);
+  await writeSettings(dir,{server:{claude:command}});
   const context=normalizeContext({tools:["bad.name","tool_0"].map(name=>({name,description:name,parameters:{type:"object"}})),
     messages:[{role:"user",content:"test",timestamp:0}]});
   const stream=streamClaudeCode({id:"test",name:"test",api,provider:providerId,baseUrl:defaultUrl,
@@ -61,4 +58,30 @@ for(const item of [
   assert.equal(message.stopReason,"toolUse",message.errorMessage);
   assert.deepEqual(events,["start","text_start","text_delta","text_end","toolcall_start","toolcall_end","done"]);
   assert.deepEqual(message.content,[{type:"text",text:"final text"},{type:"toolCall",name:"bad.name",id:"call",arguments:{value:42}}]);
+});
+
+test("usage credits stop a turn unless server.allowUsageCredits is true",async t=>{
+  const dir=await mkdtemp(join(tmpdir(),"tether-credits-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const command=join(dir,"cli.mjs");
+  await writeFile(command,`#!/usr/bin/env node
+for(const item of [
+  {type:"rate_limit_event", rate_limit_info:{isUsingOverage:true}},
+  {type:"assistant", message:{id:"response",content:[{type:"text",text:"paid answer"}]}},
+  {type:"result",subtype:"success",is_error:false}
+]) console.log(JSON.stringify(item));
+`,{mode:0o700});
+  useHome(t,dir);
+  const model={id:"test",name:"test",api,provider:providerId,baseUrl:defaultUrl,
+    maxTokens:256,contextWindow:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0},reasoning:false,input:["text"] as ["text"]};
+  const context=normalizeContext({messages:[{role:"user",content:"test",timestamp:0}]});
+  const run=async()=>{ const stream=streamClaudeCode(model,context,{}); for await(const _ of stream); return stream.result(); };
+  await writeSettings(dir,{server:{claude:command}});
+  const stopped=await run();
+  assert.equal(stopped.stopReason,"error");
+  assert.match(stopped.errorMessage!,/billing limit/);
+  await writeSettings(dir,{server:{claude:command,allowUsageCredits:true}});
+  const allowed=await run();
+  assert.equal(allowed.stopReason,"stop",allowed.errorMessage);
+  assert.deepEqual(allowed.content,[{type:"text",text:"paid answer"}]);
 });

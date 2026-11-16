@@ -3,6 +3,7 @@ import {createInterface} from "node:readline";
 import {randomUUID} from "node:crypto";
 import {getBuiltinModels} from "@earendil-works/pi-ai/providers/all";
 import {api, providerId, defaultUrl} from "../../shared/protocol.ts";
+import {loadSettings} from "../../shared/settings.ts";
 
 export const isolated = ["-p", "--tools", "", "--setting-sources", "", "--strict-mcp-config",
   "--settings", JSON.stringify({disableAllHooks:true}), "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "dontAsk"];
@@ -13,14 +14,13 @@ export async function invoke(args:string[], options:ProcessOptions) {
   const {signal} = options;
   signal?.throwIfAborted();
   const env = {...process.env, ...options.env};
-  const command = env.A_TETHER_CLAUDE || env.PI_CLAUDE_CODE_COMMAND || "claude";
+  const command = loadSettings().server.claude;
   delete env.ANTHROPIC_API_KEY;
-  delete env.A_TETHER_TOKEN;
+  delete env.A_TETHER_TOKEN; // a leftover 0.1.0 variable must not reach Claude either
   if (env.ANTHROPIC_BASE_URL || env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_FOUNDRY_API_KEY ||
       ["CLAUDE_CODE_USE_BEDROCK","CLAUDE_CODE_USE_VERTEX","CLAUDE_CODE_USE_FOUNDRY"].some(k=>env[k] && !["false","0"].includes(env[k]!))) {
     throw new Error("Conflicting backend configuration");
   }
-  if (env.PI_CLAUDE_CODE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = env.PI_CLAUDE_CODE_CONFIG_DIR;
   Object.assign(env,{ENABLE_TOOL_SEARCH:"false", CLAUDE_CODE_DISABLE_FILE_MENTIONS:"1",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY:"1", CLAUDE_CODE_DISABLE_CLAUDE_MDS:"1", DISABLE_AUTOUPDATER:"1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1", DISABLE_TELEMETRY:"1"});

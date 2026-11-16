@@ -5,7 +5,8 @@ export const api = "a-tether-v1";
 export const defaultUrl = "http://127.0.0.1:7310";
 export const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 export const messages = {
-  unauthorized: "A-tether 认证失败，请检查两端的 A_TETHER_TOKEN。",
+  unauthorized: "A-tether 令牌与 C 端不一致。在 C 上运行 npx -y @a-tether/server token，再在本机运行它给出的 login 命令。",
+  token: "A-tether 还没有配置令牌。在 C 上运行 npx -y @a-tether/server token，再在本机运行它给出的 login 命令。",
   unavailable: "C 上找不到 Claude Code，请检查服务进程的 PATH。",
   login: "C 上的 Claude Code 尚未登录或登录已失效。",
   quota: "Claude 额度、速率或计费限制，请在 C 上检查账户。",
@@ -18,7 +19,7 @@ export const messages = {
   invalid: "请求格式或模型 ID 无效。",
   duplicate: "请求 ID 已在使用。",
   large: "请求超过 32 MiB 上限。",
-  connection: "A-tether 连接中断，请检查 SSH 隧道和 C 端服务。",
+  connection: "A-tether 连接中断，请检查端口转发（如 SSH 隧道）和 C 端服务。",
 };
 export type Code = keyof typeof messages;
 

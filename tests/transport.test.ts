@@ -13,6 +13,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {normalizeContext} from "@earendil-works/pi-ai";
 import {remoteStream} from "../src/frontends/pi/extension.ts";
 import {messages} from "../src/shared/protocol.ts";
+import {useHome, writeSettings} from "./helpers.ts";
 
 async function until(predicate: () => boolean) {
   for (let i = 0; i < 200; i++) {
@@ -32,9 +33,11 @@ test("authenticated provider cancellation and disconnect reap C workers", {timeo
   const url = "http://127.0.0.1:" + port;
   const token = randomUUID();
   const marker = "project-content-" + randomUUID();
+  // C and A share one HOME here, as on a single machine: Pi needs no client settings.
+  await writeSettings(dir, {token, server:{port, claude:fileURLToPath(new URL("./fixtures/claude.mjs", import.meta.url))}});
+  const leftover = "leftover-0.1.0-token-" + randomUUID();
   const child = spawn(process.execPath, ["--experimental-transform-types", "src/server.ts"], {
-    env:{PATH:process.env.PATH, HOME:dir, TMPDIR:dir, A_TETHER_TOKEN:token, A_TETHER_PORT:String(port),
-      A_TETHER_CLAUDE:fileURLToPath(new URL("./fixtures/claude.mjs", import.meta.url)), TEST_WORKER:worker},
+    env:{PATH:process.env.PATH, HOME:dir, TMPDIR:dir, TEST_WORKER:worker, A_TETHER_TOKEN:leftover, A_TETHER_PORT:"1"},
     stdio:["ignore","pipe","pipe"],
   });
   const exited = once(child,"exit");
@@ -45,17 +48,11 @@ test("authenticated provider cancellation and disconnect reap C workers", {timeo
     await exited;
     await rm(dir, {recursive:true,force:true});
   });
-  const previous = [process.env.A_TETHER_URL, process.env.A_TETHER_TOKEN];
-  process.env.A_TETHER_URL = url;
-  process.env.A_TETHER_TOKEN = token;
-  t.after(() => {
-    for (const [i,key] of ["A_TETHER_URL","A_TETHER_TOKEN"].entries()) {
-      if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i];
-    }
-  });
+  useHome(t, dir);
   await until(() => logs.includes("listening"));
   const headers = {authorization:"Bearer " + token};
   assert.equal((await fetch(url+"/v1/health")).status,401);
+  assert.equal((await fetch(url+"/v1/health",{headers:{authorization:"Bearer " + leftover}})).status,401, "0.1.0 variables are ignored");
   const models = await (await fetch(url+"/v1/models",{headers})).json();
   const context = normalizeContext({messages:[{role:"user",content:marker,timestamp:Date.now()}]});
   let workingDir = "";
@@ -101,7 +98,9 @@ test("broken CLI cannot crash model discovery", async t => {
   t.after(() => rm(dir,{recursive:true,force:true}));
   const command = join(dir,"claude");
   await writeFile(command,"#!/missing/a-tether-test-interpreter\n",{mode:0o700});
-  await assert.rejects(discoverClaudeModels({A_TETHER_CLAUDE:command}), /ENOENT/);
+  useHome(t,dir);
+  await writeSettings(dir,{server:{claude:command}});
+  await assert.rejects(discoverClaudeModels({}), /ENOENT/);
 });
 
 test("stopping C during startup reaps the status process group and working directory", async t => {
@@ -109,8 +108,9 @@ test("stopping C during startup reaps the status process group and working direc
   const dir = await mkdtemp(join(tmpdir(),"tether-startup-"));
   const command = join(dir,"slow-claude");
   await writeFile(command,'#!/bin/sh\nsleep 20 &\necho "$!" > "$TEST_PID"\npwd > "$TEST_CWD"\nwait\n',{mode:0o700});
+  await writeSettings(dir,{token:randomUUID(),server:{claude:command}});
   const child = spawn(process.execPath,["--experimental-transform-types","src/server.ts"],{
-    env:{PATH:process.env.PATH,TMPDIR:dir,A_TETHER_TOKEN:randomUUID(),A_TETHER_CLAUDE:command,
+    env:{PATH:process.env.PATH,HOME:dir,TMPDIR:dir,
       TEST_PID:join(dir,"pid"),TEST_CWD:join(dir,"cwd")},
     stdio:"ignore",
   });

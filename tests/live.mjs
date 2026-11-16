@@ -1,16 +1,21 @@
-// Opt-in: invokes the real remote Claude account via the configured SSH tunnel.
+// Opt-in: invokes the real remote Claude account through this machine's ~/.a-tether/settings.json
+// (token and client.url) and the port forward to C.
 import assert from "node:assert/strict";
 import {randomBytes} from "node:crypto";
 import {spawn} from "node:child_process";
 import {mkdtemp, mkdir, readFile, realpath, rm, writeFile} from "node:fs/promises";
-import {tmpdir} from "node:os";
+import {homedir, tmpdir} from "node:os";
 import {join} from "node:path";
 import {createInterface} from "node:readline";
 import {once} from "node:events";
 import {fileURLToPath} from "node:url";
 
-if (!process.env.A_TETHER_TOKEN) throw new Error("Set A_TETHER_TOKEN first");
+const settings = await readFile(join(homedir(),".a-tether","settings.json"),"utf8").catch(() => "{}");
+if (!JSON.parse(settings).token) throw new Error("Run `npx -y @a-tether/pi login <token>` on this machine first");
 const dir = await realpath(await mkdtemp(join(tmpdir(),"a-tether-live-")));
+// Pi runs with HOME pointed at dir, so copy the settings there.
+await mkdir(join(dir,".a-tether"),{mode:0o700});
+await writeFile(join(dir,".a-tether","settings.json"),settings,{mode:0o600});
 const project = join(dir,"project-A");
 const root = fileURLToPath(new URL("../",import.meta.url));
 await mkdir(project);
@@ -21,8 +26,7 @@ async function run(tools, prompt) {
     ...(tools ? ["--tools",tools] : ["--no-tools"]),prompt];
   const child = spawn(process.execPath,args,{
     cwd:project,stdio:["ignore","pipe","inherit"],
-    env:{PATH:process.env.PATH,HOME:dir,PI_CODING_AGENT_DIR:join(dir,"pi"),
-      A_TETHER_TOKEN:process.env.A_TETHER_TOKEN,A_TETHER_URL:process.env.A_TETHER_URL},
+    env:{PATH:process.env.PATH,HOME:dir,PI_CODING_AGENT_DIR:join(dir,"pi")},
   });
   const done = once(child,"close");
   const results = [];

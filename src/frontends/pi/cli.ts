@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { displayPath, loadSettings, saveToken } from "../../shared/settings.ts";
 
 const extension = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./extension.ts" : "./extension.js", import.meta.url));
 const subcommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"]);
@@ -17,8 +18,8 @@ function executable(file: string) {
   } catch { return false; }
 }
 
-export function findPi(env: NodeJS.ProcessEnv = process.env) {
-  if (env.A_TETHER_PI) return executable(env.A_TETHER_PI) ? env.A_TETHER_PI : undefined;
+export function findPi(env: NodeJS.ProcessEnv = process.env, configured = loadSettings().client.pi) {
+  if (configured) return executable(configured) ? configured : undefined;
   const names = windows ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
   for (const dir of (env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
@@ -35,22 +36,37 @@ export function piArgs(args: string[]) {
   return ["-e", extension, ...(hasModel ? [] : ["--model", "a-tether/default"]), ...args];
 }
 
+export function login(args: string[]) {
+  if (args.length !== 1) throw new Error("用法：npx -y @a-tether/pi login <令牌>\n令牌在 C 上运行 npx -y @a-tether/server token 查看。");
+  saveToken(args[0]);
+  return [
+    `令牌已保存到 ${displayPath}。`,
+    "接下来在项目目录运行 pi（已用 pi install npm:@a-tether/pi 安装插件时）或 npx -y @a-tether/pi，",
+    "在 Pi 中运行 /a-tether-status 检查连接。",
+  ].join("\n");
+}
+
 function main() {
-  const pi = findPi();
+  const argv = process.argv.slice(2);
+  if (argv[0] === "login") {
+    try { console.log(login(argv.slice(1))); }
+    catch (error) { console.error((error as Error).message); process.exitCode = 1; }
+    return;
+  }
+  let pi: string | undefined;
+  try { pi = findPi(); }
+  catch (error) { console.error((error as Error).message); process.exit(1); }
   if (!pi) {
     console.error([
-      "a-tether-pi 需要本机已安装的 Pi，但在 PATH 中找不到 pi 命令。",
+      "a-tether-pi 需要本机已安装的 Pi，但找不到 pi 命令。",
       "请先自行安装 Pi，例如：",
       "  npm install -g @earendil-works/pi-coding-agent",
       "安装后确认 `pi --version` 可以运行，再重新执行 a-tether-pi。",
-      "如果 pi 不在 PATH 中，可设置 A_TETHER_PI 为它的绝对路径。",
+      `如果 pi 不在 PATH 中，可在 ${displayPath} 的 client.pi 填写它的绝对路径。`,
     ].join("\n"));
     process.exit(1);
   }
-  const args = piArgs(process.argv.slice(2));
-  if (!process.env.A_TETHER_TOKEN && args[0] === "-e") {
-    console.error("提示：未设置 A_TETHER_TOKEN，Pi 将无法连接 C 端服务。");
-  }
+  const args = piArgs(argv);
   // Windows .cmd shims can only be started through a shell.
   const shell = windows && /\.cmd$/i.test(pi);
   const quote = (value: string) => shell ? `"${value.replace(/"/g, '""')}"` : value;

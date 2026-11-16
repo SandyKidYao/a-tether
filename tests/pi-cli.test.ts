@@ -4,6 +4,7 @@ import {chmod, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {findPi, piArgs} from "../src/frontends/pi/cli.ts";
+import {useHome} from "./helpers.ts";
 
 test("a-tether-pi adds the extension and default model, but passes subcommands through", () => {
   const [flag, extension, ...rest] = piArgs(["-p", "hi"]);
@@ -18,12 +19,14 @@ test("a-tether-pi adds the extension and default model, but passes subcommands t
 test("a-tether-pi only uses an existing pi and never installs one", async t => {
   const dir = await mkdtemp(join(tmpdir(), "a-tether-pi-"));
   t.after(() => rm(dir, {recursive: true, force: true}));
+  useHome(t, dir);
   assert.equal(findPi({PATH: dir}), undefined);
   const pi = join(dir, "pi");
   await writeFile(pi, "#!/bin/sh\n");
   assert.equal(findPi({PATH: dir}), undefined, "not executable");
   await chmod(pi, 0o755);
   assert.equal(findPi({PATH: dir}), pi);
-  assert.equal(findPi({PATH: "", A_TETHER_PI: pi}), pi);
-  assert.equal(findPi({PATH: dir, A_TETHER_PI: join(dir, "missing")}), undefined);
+  assert.equal(findPi({PATH: ""}, pi), pi, "client.pi wins over PATH");
+  assert.equal(findPi({PATH: dir}, join(dir, "missing")), undefined);
+  assert.equal(findPi({PATH: dir, A_TETHER_PI: join(dir, "missing")}), pi, "the 0.1.0 variable is ignored");
 });

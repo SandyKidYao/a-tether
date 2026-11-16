@@ -3,6 +3,7 @@ import { createProvider, createAssistantMessageEventStream, type AssistantMessag
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { api, defaultUrl, generationOptions, messages, providerId } from "../../shared/protocol.ts";
 import { request, errorMessage } from "../../client/http.ts";
+import { displayPath, loadSettings } from "../../shared/settings.ts";
 
 export const remoteStream: StreamFunction<string, SimpleStreamOptions> = (model, context, options) => {
   const stream = createAssistantMessageEventStream();
@@ -78,18 +79,25 @@ export const remoteStream: StreamFunction<string, SimpleStreamOptions> = (model,
 export default function extension(pi: ExtensionAPI) {
   pi.registerProvider(createProvider({
     id: providerId, name: "A-tether · Remote Claude", baseUrl: defaultUrl,
+    // Always report the provider as configured so its models stay listed. A missing
+    // or wrong token is explained when Pi starts and on each request instead.
     auth: {apiKey: {
       name: "A-tether token",
-      async check() { return process.env.A_TETHER_TOKEN ? {type:"api_key", source:"A_TETHER_TOKEN"} : undefined; },
-      async resolve() { return {auth:{apiKey:"a-tether"}, source:"A_TETHER_TOKEN"}; },
+      async check() { return {type:"api_key", source:displayPath}; },
+      async resolve() { return {auth:{apiKey:"a-tether"}, source:displayPath}; },
     }},
     models: [{ id:"default", name:"Default (C)", api, provider:providerId, baseUrl:defaultUrl, reasoning:true,
       input:["text","image"], contextWindow:200000, maxTokens:64000, cost:{input:0,output:0,cacheRead:0,cacheWrite:0} }],
     async fetchModels({signal}) { return (await request("/v1/models", {signal})).json(); },
     api: {stream: remoteStream, streamSimple: remoteStream},
   }));
+  pi.on("session_start", (event, ctx) => {
+    if (event.reason !== "startup") return;
+    try { if (!loadSettings().token) ctx.ui.notify(messages.token, "warning"); }
+    catch (error) { ctx.ui.notify((error as Error).message, "error"); }
+  });
   pi.registerCommand("a-tether-status", {
-    description: "Check the SSH tunnel and Claude Code login on C",
+    description: "Check the connection to C and Claude Code login on C",
     handler: async (_args, ctx) => {
       try {
         const health = await (await request("/v1/health", {signal:ctx.signal})).json();

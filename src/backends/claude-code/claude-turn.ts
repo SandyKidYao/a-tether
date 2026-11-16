@@ -5,6 +5,7 @@ import {fileURLToPath} from "node:url";
 import {calculateCost, createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools,
   type AssistantMessage, type Model, type SimpleStreamOptions, type TranscriptContext} from "@earendil-works/pi-ai";
 import {invoke, isolated, streaming} from "./claude-process.ts";
+import {loadSettings} from "../../shared/settings.ts";
 
 // Present the conversation in order, retaining call IDs and images. Do not forward
 // provider diagnostics, local tool details, or session bookkeeping to Claude.
@@ -35,6 +36,7 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
     timestamp:Date.now(),content:[],stopReason:"pending",
     usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
   async function generate() {
+    const {allowUsageCredits} = loadSettings().server;
     const tools = getCurrentTools(context.messages);
     const reserved = new Set(tools.map(tool => tool.name));
     function transportName(name:string,index:number) {
@@ -163,7 +165,7 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
             message.usage.totalTokens = input+output+cacheRead+cacheWrite;
             calculateCost(model,message.usage);
           } else if (envelope.type === "rate_limit_event" && envelope.rate_limit_info?.isUsingOverage &&
-              process.env.PI_CLAUDE_CODE_ALLOW_USAGE_CREDITS !== "1") {
+              !allowUsageCredits) {
             throw new Error("Claude billing limit");
           }
         }});

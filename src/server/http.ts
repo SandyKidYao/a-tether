@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backend, BackendModel } from "../backends/backend.ts";
 import { generationOptions, uuid, wireEvent, type Code } from "../shared/protocol.ts";
+import { isLoopback, validToken } from "../shared/settings.ts";
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, {"content-type": "application/json", "cache-control": "no-store"}).end(JSON.stringify(data));
@@ -58,14 +59,10 @@ async function readRequest(req: IncomingMessage) {
   catch { throw new Failure(400, "invalid"); }
 }
 
-export async function runServer(backend: Backend) {
-  const token = process.env.A_TETHER_TOKEN;
-  if (!token || token.length < 32 || /\s/.test(token)) throw new Error("Set A_TETHER_TOKEN to a random token of at least 32 characters");
+export async function runServer(backend: Backend, {token, host, port}: {token: string; host: string; port: number}) {
+  if (!validToken(token)) throw new Error("A-tether token must be at least 32 characters without whitespace");
   const digest = (value: string) => createHash("sha256").update(value).digest();
   const expected = digest("Bearer " + token);
-  delete process.env.A_TETHER_TOKEN;
-  const port = Number(process.env.A_TETHER_PORT ?? 7310);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid A_TETHER_PORT");
 
   const directory = await mkdtemp(join(tmpdir(), "a-tether-"));
   process.chdir(directory);
@@ -171,9 +168,10 @@ export async function runServer(backend: Backend) {
       : health.diagnostic ? "status check failed" + (health.detail ? " (" + clip(health.detail) + ")" : "")
       : health.loggedIn ? "logged in" : "not logged in";
     console.log(backend.name + ":", state);
-    server.listen(port, "127.0.0.1");
+    server.listen(port, host);
     await once(server, "listening", {signal:startup.signal});
-    console.log("A-tether listening on 127.0.0.1:" + port);
+    console.log("A-tether listening on " + (host.includes(":") ? `[${host}]` : host) + ":" + port);
+    if (!isLoopback(host)) console.log("注意：服务监听在非本机地址，令牌以明文 HTTP 传输，同一网络中的设备都能连接。");
     await once(server, "close");
   } catch (error) {
     if (!startup.signal.aborted) throw error;
