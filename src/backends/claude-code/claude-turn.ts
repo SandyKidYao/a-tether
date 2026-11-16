@@ -94,9 +94,10 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
         } else throw new Error("Claude final content differs from stream");
       }
       stream.push({type:"start",partial:message});
-      const code = await invoke(args,{signal:options.signal,cwd:dir,input:userInput(context),
+      const {code, stderr} = await invoke(args,{signal:options.signal,cwd:dir,input:userInput(context),
         env:options.maxTokens ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS:String(options.maxTokens)} : {},onLine(line) {
-          const envelope = JSON.parse(line);
+          let envelope;
+          try { envelope = JSON.parse(line); } catch { return; } // ignore non-JSON noise on stdout
           if (envelope.parent_tool_use_id) return;
           if (envelope.type === "stream_event") {
             const e = envelope.event;
@@ -154,7 +155,7 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
             const calls = message.content.some(b=>b.type==="toolCall");
             completed = envelope.subtype==="success" && !envelope.is_error || calls && envelope.subtype==="error_max_turns";
             stopReason = envelope.stop_reason || stopReason;
-            if (!completed && !cliError) cliError = JSON.stringify(envelope.errors || envelope.result);
+            if (!completed) cliError = [cliError, JSON.stringify(envelope.errors || envelope.result)].filter(Boolean).join("; ");
             const u = envelope.usage ?? {};
             Object.assign(message.usage,{input:u.input_tokens ?? 0,output:u.output_tokens ?? 0,
               cacheRead:u.cache_read_input_tokens ?? 0,cacheWrite:u.cache_creation_input_tokens ?? 0});
@@ -167,7 +168,7 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
           }
         }});
       const calls = message.content.some(b=>b.type==="toolCall");
-      if (pendingFinal.length || !hasAssistant || !completed || cliError || (code && !calls)) throw new Error(cliError || "Claude did not finish");
+      if (pendingFinal.length || !hasAssistant || !completed || cliError || (code && !calls)) throw new Error([cliError || "Claude did not finish", "exit "+code, stderr].filter(Boolean).join("; "));
       if (stopReason === "refusal") throw new Error("Claude refused this request");
       message.stopReason = stopReason === "max_tokens" ? "length" : calls ? "toolUse" : "stop";
     } finally { await rm(dir,{recursive:true,force:true}); }

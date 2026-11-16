@@ -11,9 +11,41 @@ import { generationOptions, uuid, wireEvent, type Code } from "../shared/protoco
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, {"content-type": "application/json", "cache-control": "no-store"}).end(JSON.stringify(data));
 }
-class Failure extends Error {
-  constructor(readonly status: number, readonly code: Code) { super(code); }
+export class Failure extends Error {
+  constructor(readonly status: number, readonly code: Code, readonly detail = "") { super(code); }
 }
+// C logs one line per failure: time, request ID prefix, code and a clipped
+// diagnostic from Claude Code. Conversation content and tool data are never logged.
+export function clip(text: string) { return text.replace(/\s+/g, " ").trim().slice(0, 500); }
+function logError(id: string, code: string, detail = "") {
+  const text = clip(detail);
+  console.error(`${new Date().toISOString()} ${id ? id.slice(0, 8) : "--------"} ${code}${text ? ": " + text : ""}`);
+}
+function describe(error: unknown) {
+  return error instanceof Failure ? error.detail : error instanceof Error ? error.message : typeof error === "string" ? error : "";
+}
+
+// Keeps the last good catalog when a refresh fails transiently, such as a slow
+// `claude auth status`, and retries soon instead of failing the request.
+export function catalogCache<T>(load: (signal: AbortSignal) => Promise<T[]>, onStale: (detail: string) => void,
+    ttl = 60_000, retry = 10_000, now = Date.now) {
+  let catalog: T[] = [];
+  let refreshAt = 0;
+  return async (signal: AbortSignal) => {
+    if (now() < refreshAt) return catalog;
+    try {
+      catalog = await load(signal);
+      refreshAt = now() + ttl;
+    } catch (error) {
+      const transient = error instanceof Failure && (error.code === "backend" || error.code === "discovery");
+      if (signal.aborted || !transient || !catalog.length) throw error;
+      onStale(error.detail);
+      refreshAt = now() + retry;
+    }
+    return catalog;
+  };
+}
+
 async function readRequest(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -40,25 +72,26 @@ export async function runServer(backend: Backend) {
   const active = new Map<string, AbortController>();
   const pending = new Set<Promise<void>>();
   const controllers = new Set<AbortController>();
-  let catalog: BackendModel[] = [];
-  let refreshAt = 0;
 
-  async function models(signal: AbortSignal) {
-    if (Date.now() < refreshAt) return catalog;
+  const models = catalogCache<BackendModel>(async signal => {
     const health = await backend.status(signal);
-    if (!health.available) throw new Failure(503, "unavailable");
-    if (health.diagnostic) throw new Failure(502, "backend");
+    if (!health.available) throw new Failure(503, "unavailable", health.detail);
+    if (health.diagnostic) throw new Failure(502, "backend", "status check failed: " + (health.detail ?? "unknown"));
     if (!health.loggedIn) throw new Failure(503, "login");
-    try {
-      catalog = await backend.models(signal);
-      refreshAt = Date.now() + 60_000;
-      return catalog;
-    } catch { throw new Failure(502, "discovery"); }
-  }
+    try { return await backend.models(signal); }
+    catch (error) {
+      signal.throwIfAborted();
+      throw new Failure(502, "discovery", describe(error));
+    }
+  }, detail => logError("", "stale-catalog", detail));
+
   async function handle(req: IncomingMessage, res: ServerResponse, controller: AbortController) {
     if (!timingSafeEqual(digest(req.headers.authorization ?? ""), expected)) throw new Failure(401, "unauthorized");
     const signal = controller.signal;
-    if (req.method === "GET" && req.url === "/v1/health") return json(res, 200, await backend.status(signal));
+    if (req.method === "GET" && req.url === "/v1/health") {
+      const {available, loggedIn, diagnostic} = await backend.status(signal);
+      return json(res, 200, {available, loggedIn, diagnostic});
+    }
     if (req.method === "GET" && req.url === "/v1/models") return json(res, 200, (await models(signal)).map(({route, ...model}) => model));
     const cancelId = req.url?.slice("/v1/requests/".length) ?? "";
     if (req.method === "DELETE" && req.url?.startsWith("/v1/requests/") && uuid.test(cancelId)) {
@@ -75,7 +108,7 @@ export async function runServer(backend: Backend) {
     try {
       const model = (await models(signal)).find(m => m.id === body.model);
       signal.throwIfAborted();
-      if (!model) throw new Failure(400, "invalid");
+      if (!model) throw new Failure(400, "invalid", "unknown model");
       res.writeHead(200, {"content-type": "application/x-ndjson", "cache-control": "no-store"});
       res.flushHeaders();
       const stream = backend.stream(model, normalizeContext({messages: body.context.messages}), {
@@ -83,10 +116,14 @@ export async function runServer(backend: Backend) {
       });
       try {
         for await (const event of stream) {
+          if (event.type === "error") {
+            const code = signal.aborted ? signal.reason : backend.errorCode(event.error.errorMessage ?? "");
+            logError(id, code, signal.aborted ? "" : event.error.errorMessage);
+            if (!res.destroyed) res.write(JSON.stringify({id, type: "error", code}) + "\n");
+            continue;
+          }
           if (res.destroyed) continue;
-          const frame = event.type === "error"
-            ? {id, type: "error", code: signal.aborted ? signal.reason : backend.errorCode(event.error.errorMessage ?? "")}
-            : {id, type: event.type === "done" ? "done" : "event", event: wireEvent(event)};
+          const frame = {id, type: event.type === "done" ? "done" : "event", event: wireEvent(event)};
           if (!res.write(JSON.stringify(frame) + "\n") && !signal.aborted) await once(res, "drain", {signal});
         }
       } finally {
@@ -94,6 +131,9 @@ export async function runServer(backend: Backend) {
         await stream.result();
       }
       res.end();
+    } catch (error) {
+      (error as {requestId?: string}).requestId = id;
+      throw error;
     } finally { clearTimeout(timer); active.delete(id); }
   }
 
@@ -102,9 +142,14 @@ export async function runServer(backend: Backend) {
     controllers.add(controller);
     res.once("close", () => controller.abort("cancelled"));
     const task = handle(req, res, controller).catch(error => {
+      const reason = controller.signal.reason;
+      const failure = error instanceof Failure ? error
+        : reason === "timeout" ? new Failure(504, "timeout")
+        : reason === "cancelled" ? new Failure(499, "cancelled")
+        : new Failure(502, "backend", describe(error));
+      logError((error as {requestId?: string})?.requestId ?? "", failure.code, failure.detail);
       if (res.destroyed) return;
       if (res.headersSent) return res.destroy();
-      const failure = error instanceof Failure ? error : new Failure(502, "backend");
       json(res, failure.status, {code: failure.code});
     }).then(() => {});
     pending.add(task);
@@ -122,7 +167,10 @@ export async function runServer(backend: Backend) {
   try {
     const health = await backend.status(startup.signal);
     startup.signal.throwIfAborted();
-    console.log(backend.name + ":", health.available ? health.loggedIn ? "logged in" : "login unavailable" : "missing");
+    const state = !health.available ? "missing"
+      : health.diagnostic ? "status check failed" + (health.detail ? " (" + clip(health.detail) + ")" : "")
+      : health.loggedIn ? "logged in" : "not logged in";
+    console.log(backend.name + ":", state);
     server.listen(port, "127.0.0.1");
     await once(server, "listening", {signal:startup.signal});
     console.log("A-tether listening on 127.0.0.1:" + port);

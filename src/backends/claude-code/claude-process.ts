@@ -25,7 +25,11 @@ export async function invoke(args:string[], options:ProcessOptions) {
     CLAUDE_CODE_DISABLE_AUTO_MEMORY:"1", CLAUDE_CODE_DISABLE_CLAUDE_MDS:"1", DISABLE_AUTOUPDATER:"1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1", DISABLE_TELEMETRY:"1"});
   const child = spawn(command,args,{cwd:options.cwd,env,detached:process.platform!=="win32",windowsHide:true,
-    stdio:["pipe","pipe","ignore"]});
+    stdio:["pipe","pipe","pipe"]});
+  // Keep only a short stderr tail for the C diagnostic log.
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data",(data:string)=>{stderr=(stderr+data).slice(-4096);});
   const closed = new Promise<number>((resolve,reject)=>{
     child.once("error",reject);
     child.once("close",code=>resolve(code ?? -1));
@@ -49,7 +53,7 @@ export async function invoke(args:string[], options:ProcessOptions) {
     const output = (async () => { for await (const line of lines) options.onLine(line); })();
     const [code] = await Promise.all([closed,output]);
     signal?.throwIfAborted();
-    return code;
+    return {code, stderr:stderr.trim()};
   } finally {
     stop();
     await closed.catch(()=>{});
@@ -64,23 +68,31 @@ function deadline(signal?:AbortSignal) {
 }
 export async function getClaudeStatus(env:NodeJS.ProcessEnv, signal?:AbortSignal) {
   let data = "";
+  let result = {code:0, stderr:""};
   try {
-    await invoke(["auth","status"],{env,signal:deadline(signal),onLine:line=>{data=(data+line).slice(-65536);}});
+    result = await invoke(["auth","status"],{env,signal:deadline(signal),onLine:line=>{data=(data+line).slice(-65536);}});
     const status = JSON.parse(data);
-    return {available:true,loggedIn:status.loggedIn===true,diagnostic:typeof status.loggedIn!=="boolean"};
+    const diagnostic = typeof status.loggedIn!=="boolean";
+    return {available:true,loggedIn:status.loggedIn===true,diagnostic,
+      detail:diagnostic ? "unexpected auth status output" : undefined};
   } catch (error) {
     signal?.throwIfAborted();
     const available = (error as NodeJS.ErrnoException).code !== "ENOENT";
-    return {available,loggedIn:false,diagnostic:available};
+    const reason = (error as Error)?.name === "TimeoutError" ? "claude auth status timed out after 20s"
+      : error instanceof SyntaxError ? "claude auth status printed no JSON"
+      : error instanceof Error ? error.message : String(error);
+    const detail = [reason, result.code ? "exit "+result.code : "", result.stderr].filter(Boolean).join("; ");
+    return {available,loggedIn:false,diagnostic:available,detail};
   }
 }
 export async function discoverClaudeModels(env:NodeJS.ProcessEnv, signal?:AbortSignal) {
   const request_id = randomUUID();
   const models = new Map<string,ReturnType<typeof modelEntry>>();
   const input = JSON.stringify({type:"control_request",request_id,request:{subtype:"initialize"}})+"\n";
-  const code = await invoke([...isolated,...streaming,"--mcp-config",'{"mcpServers":{}}'],{
+  const {code, stderr} = await invoke([...isolated,...streaming,"--mcp-config",'{"mcpServers":{}}'],{
     env,signal:deadline(signal),input,onLine(line) {
-      const event = JSON.parse(line);
+      let event;
+      try { event = JSON.parse(line); } catch { return; }
       const reply = event.response;
       if (event.type !== "control_response" || reply?.request_id !== request_id || reply.subtype !== "success") return;
       for (const row of reply.response.models) {
@@ -90,7 +102,7 @@ export async function discoverClaudeModels(env:NodeJS.ProcessEnv, signal?:AbortS
       }
     },
   });
-  if (code || !models.size) throw new Error("Model discovery failed");
+  if (code || !models.size) throw new Error(["Model discovery failed", "exit "+code, stderr].filter(Boolean).join("; "));
   return [...models.values()];
 }
 function modelEntry(row:{value:string; resolvedModel?:string; displayName:string; supportsEffort?:boolean}) {

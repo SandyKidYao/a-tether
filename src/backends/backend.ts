@@ -5,7 +5,8 @@ import type { Code } from "../shared/protocol.ts";
 export type BackendModel = Model<string> & { route: string };
 export interface Backend {
   name: string;
-  status(signal?: AbortSignal): Promise<{ available: boolean; loggedIn: boolean; diagnostic: boolean }>;
+  // detail is a short local diagnostic for the C log; it never crosses the wire.
+  status(signal?: AbortSignal): Promise<{ available: boolean; loggedIn: boolean; diagnostic: boolean; detail?: string }>;
   models(signal: AbortSignal): Promise<BackendModel[]>;
   stream(model: BackendModel, context: TranscriptContext, options: SimpleStreamOptions): AssistantMessageEventStream;
   errorCode(detail: string): Code;
