@@ -6,23 +6,26 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "scripts": {
+    "server": "node --experimental-transform-types src/server.ts",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-transform-types --test tests/*.test.ts",
+    "test:live": "node tests/live.mjs",
+    "build": "node scripts/build.mjs",
+    "pack:dry": "npm run build && npm pack --dry-run ./packages/a-tether-server ./packages/pi-tether"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.5.2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3"
+  },
   "pi": {
     "extensions": [
       "./src/frontends/pi/extension.ts"
     ]
   },
-  "scripts": {
-    "server": "node --experimental-transform-types src/server.ts",
-    "check": "tsc --noEmit",
-    "test": "node --experimental-transform-types --test tests/*.test.ts",
-    "test:live": "node tests/live.mjs"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "1.5.0"
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.0",
-    "@types/node": "^22.19.0",
-    "typescript": "~5.9.3"
-  }
+  "license": "MIT"
 }

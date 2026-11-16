@@ -1,0 +1,26 @@
+{
+  "name": "a-tether-server",
+  "version": "0.1.0",
+  "description": "A-tether C-side service: lends a logged-in Claude Code to Pi on another machine over an SSH tunnel.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SandyKidYao/a-tether.git",
+    "directory": "packages/a-tether-server"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "a-tether-server": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.5.2"
+  }
+}

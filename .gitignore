@@ -1,3 +1,6 @@
 node_modules/
+build/
+packages/*/dist/
+packages/*/LICENSE
 
 .DS_Store

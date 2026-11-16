@@ -6,19 +6,32 @@
 
 ## 两台电脑如何配置
 
-按 [A 和 C 配置速查](docs/setup.md) 操作：先在 C 启动服务，再在 A 建立 SSH 隧道，并从 A 的开发项目目录启动 Pi。
+按 [A 和 C 配置速查](docs/setup.md) 操作：先在 C 用 `npx -y a-tether-server` 启动服务，再在 A 建立 SSH 隧道，并从 A 的开发项目目录运行 `npx -y pi-tether`。A 上需要先自行安装 Pi；也可用 `pi install npm:pi-tether` 把插件持久装入 Pi。
 
 ## 项目结构
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/frontends/pi/` | Pi 插件，注册模型并将流式事件交给 Pi。其他前端可放在同级目录。 |
+| `src/frontends/pi/` | Pi 插件（`extension.ts`）和 `pi-tether` 启动器（`cli.ts`）。其他前端可放在同级目录。 |
 | `src/client/` | A 端共用的 HTTP 请求、回环地址检查和服务认证。 |
 | `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期。 |
 | `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换与只读工具目录。 |
 | `src/shared/` | 两端共用的 v0.1 协议、事件编码和错误码。 |
+| `packages/` | 两个 npm 包的清单和说明：`a-tether-server`（C 端）与 `pi-tether`（A 端）。`dist/` 由构建生成。 |
+| `scripts/build.mjs` | 用 `tsconfig.build.json` 把 `src` 编译成 JS，并组装两个包。 |
 
 新后端实现 [Backend 接口](src/backends/backend.ts)，在 [C 端入口](src/server.ts) 选用。新前端可复用 HTTP 客户端并映射 v0.1 的消息和事件。当前协议沿用 Pi 的消息结构，服务每次启动加载一个后端。
+
+## 打包与发布
+
+```sh
+npm run build        # 编译并生成 packages/*/dist，版本号取根 package.json
+npm run pack:dry     # 构建并列出两个包将发布的文件
+npm publish ./packages/a-tether-server
+npm publish ./packages/pi-tether
+```
+
+两个包同版本发布。`pi-tether` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
 
 ## 复验
 
