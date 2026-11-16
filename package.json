@@ -12,7 +12,7 @@
     "test": "node --experimental-transform-types --test tests/*.test.ts",
     "test:live": "node tests/live.mjs",
     "build": "node scripts/build.mjs",
-    "pack:dry": "npm run build && npm pack --dry-run ./packages/a-tether-server ./packages/pi-tether"
+    "pack:dry": "npm run build && npm pack --dry-run ./packages/server ./packages/pi"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.5.2"

@@ -37,10 +37,11 @@ jobs:
       - name: Publish packages (skips versions already on npm, so reruns are safe)
         run: |
           V=$(node -p "require('./package.json').version")
-          for p in a-tether-server pi-tether; do
+          for d in server pi; do
+            p="@a-tether/$d"
             if npm view "$p@$V" version >/dev/null 2>&1; then
               echo "$p@$V already published, skipping"
               continue
             fi
-            npm publish "./packages/$p" --access public
+            npm publish "./packages/$d" --access public
           done

@@ -6,7 +6,7 @@
 
 ## 两台电脑如何配置
 
-按 [A 和 C 配置速查](docs/setup.md) 操作：先在 C 用 `npx -y a-tether-server` 启动服务，再在 A 建立 SSH 隧道，并从 A 的开发项目目录运行 `npx -y pi-tether`。A 上需要先自行安装 Pi；也可用 `pi install npm:pi-tether` 把插件持久装入 Pi。
+按 [A 和 C 配置速查](docs/setup.md) 操作：先在 C 用 `npx -y @a-tether/server` 启动服务，再在 A 建立 SSH 隧道，并从 A 的开发项目目录运行 `npx -y @a-tether/pi`。A 上需要先自行安装 Pi；也可用 `pi install npm:@a-tether/pi` 把插件持久装入 Pi。
 
 ## 项目结构
 
@@ -17,7 +17,7 @@
 | `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期。 |
 | `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换与只读工具目录。 |
 | `src/shared/` | 两端共用的 v0.1 协议、事件编码和错误码。 |
-| `packages/` | 两个 npm 包的清单和说明：`a-tether-server`（C 端）与 `pi-tether`（A 端）。`dist/` 由构建生成。 |
+| `packages/` | 两个 npm 包的清单和说明：`server` 发布为 `@a-tether/server`（C 端，命令 `a-tether-server`），`pi` 发布为 `@a-tether/pi`（A 端，命令 `pi-tether`）。`dist/` 由构建生成。 |
 | `scripts/build.mjs` | 用 `tsconfig.build.json` 把 `src` 编译成 JS，并组装两个包。 |
 
 新后端实现 [Backend 接口](src/backends/backend.ts)，在 [C 端入口](src/server.ts) 选用。新前端可复用 HTTP 客户端并映射 v0.1 的消息和事件。当前协议沿用 Pi 的消息结构，服务每次启动加载一个后端。
@@ -37,9 +37,9 @@ npm run pack:dry     # 构建并列出两个包将发布的文件
 
 `ci.yml` 在推送到 main 和 PR 时运行检查、测试和打包预览。
 
-首次发布需手动完成：`npm login` 后运行 `npm run build`、`npm publish ./packages/a-tether-server --access public`、`npm publish ./packages/pi-tether --access public`。然后在 npmjs.com 上为两个包分别配置 Trusted Publisher（GitHub Actions，仓库 `SandyKidYao/a-tether`，workflow `publish.yml`，environment `npm`），并在 GitHub 仓库中创建名为 `npm` 的 Environment，可设置人工审批。
+首次发布需手动完成：`npm login` 后运行 `npm run build`、`npm publish ./packages/server`、`npm publish ./packages/pi`。然后在 npmjs.com 上为两个包分别配置 Trusted Publisher（GitHub Actions，仓库 `SandyKidYao/a-tether`，workflow `publish.yml`，environment `npm`），并在 GitHub 仓库中创建名为 `npm` 的 Environment，可设置人工审批。
 
-`pi-tether` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
+`@a-tether/pi` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
 
 ## 复验
 

@@ -11,8 +11,8 @@ execFileSync(process.execPath, [join(root, "node_modules/typescript/bin/tsc"), "
 
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const packages = {
-  "a-tether-server": {files: ["server.js", "server", "backends", "shared"], extra: [["src/backends/claude-code/tool-catalog.mjs", "backends/claude-code/tool-catalog.mjs"]], bins: ["server.js"]},
-  "pi-tether": {files: ["frontends/pi", "client", "shared"], extra: [], bins: ["frontends/pi/cli.js"]},
+  server: {files: ["server.js", "server", "backends", "shared"], extra: [["src/backends/claude-code/tool-catalog.mjs", "backends/claude-code/tool-catalog.mjs"]], bins: ["server.js"]},
+  pi: {files: ["frontends/pi", "client", "shared"], extra: [], bins: ["frontends/pi/cli.js"]},
 };
 for (const [name, spec] of Object.entries(packages)) {
   const dir = join(root, "packages", name);
@@ -27,4 +27,4 @@ for (const [name, spec] of Object.entries(packages)) {
   writeFileSync(join(dir, "package.json"), JSON.stringify(manifest, null, 2) + "\n");
 }
 rmSync(build, {recursive: true, force: true});
-console.log("built packages/a-tether-server and packages/pi-tether at", version);
+console.log("built packages/server (@a-tether/server) and packages/pi (@a-tether/pi) at", version);

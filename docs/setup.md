@@ -4,7 +4,7 @@
 
 以下命令适用于 macOS 的 zsh 或 Linux 的 bash。两端准备 Node.js 22.19+。已验证 Pi 1.5.2、Claude Code 2.1.323、Node.js 22.23.4。C 需要运行 SSH 服务并允许本地端口转发。
 
-A-tether 发布为两个 npm 包：C 端用 `a-tether-server`，A 端用 `pi-tether`。两端的包版本应保持一致。
+A-tether 发布为两个 npm 包：C 端用 `@a-tether/server`（命令 `a-tether-server`），A 端用 `@a-tether/pi`（命令 `pi-tether`）。两端的包版本应保持一致。
 
 ## 1. 在 C 启动服务
 
@@ -16,10 +16,10 @@ if [ ! -e ~/.config/a-tether/token ]; then
   (umask 077; set -C; openssl rand -hex 32 > ~/.config/a-tether/token)
 fi
 export A_TETHER_TOKEN="$(cat ~/.config/a-tether/token)"
-npx -y a-tether-server
+npx -y @a-tether/server
 ```
 
-下次启动 C 服务时，在同一终端重新导出令牌，再运行 `npx -y a-tether-server`。长期使用可改为 `npm install -g a-tether-server`，之后直接运行 `a-tether-server`。服务启动时显示 Claude 登录状态，并监听 `127.0.0.1:7310`。可通过 `A_TETHER_PORT` 修改 C 的端口。
+下次启动 C 服务时，在同一终端重新导出令牌，再运行 `npx -y @a-tether/server`。长期使用可改为 `npm install -g @a-tether/server`，之后直接运行 `a-tether-server`。服务启动时显示 Claude 登录状态，并监听 `127.0.0.1:7310`。可通过 `A_TETHER_PORT` 修改 C 的端口。
 
 ## 2. 在 A 建立 SSH 隧道
 
@@ -44,15 +44,15 @@ npm install -g @earendil-works/pi-coding-agent
 export A_TETHER_URL=http://127.0.0.1:7311
 export A_TETHER_TOKEN="$(ssh user@C 'cat ~/.config/a-tether/token')"
 cd /path/to/your/project
-npx -y pi-tether
+npx -y @a-tether/pi
 ```
 
-`pi-tether` 会找到 PATH 中的 `pi`，加载 A-tether 插件并默认选用 `a-tether/default`。其余参数原样传给 Pi，例如 `npx pi-tether --model a-tether/claude-opus-5-5`。如果 `pi` 不在 PATH 中，可设置 `PI_TETHER_PI` 为它的绝对路径。
+`pi-tether` 会找到 PATH 中的 `pi`，加载 A-tether 插件并默认选用 `a-tether/default`。其余参数原样传给 Pi，例如 `npx @a-tether/pi --model a-tether/claude-opus-5-5`。如果 `pi` 不在 PATH 中，可设置 `PI_TETHER_PI` 为它的绝对路径。
 
 也可以把插件持久安装到 Pi，之后直接运行 `pi` 并用 `/model` 选择 A-tether 模型：
 
 ```sh
-pi install npm:pi-tether
+pi install npm:@a-tether/pi
 ```
 
 进入 Pi 后可用 `/model` 切换 A-tether 模型，按 Esc 取消当前请求。

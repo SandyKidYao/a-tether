@@ -12,7 +12,7 @@ test("pi-tether adds the extension and default model, but passes subcommands thr
   assert.deepEqual(rest, ["--model", "a-tether/default", "-p", "hi"]);
   assert.deepEqual(piArgs(["--model", "a-tether/claude-opus-5-5"]).slice(2), ["--model", "a-tether/claude-opus-5-5"]);
   assert.deepEqual(piArgs(["--model=x"]).slice(2), ["--model=x"]);
-  assert.deepEqual(piArgs(["install", "npm:pi-tether"]), ["install", "npm:pi-tether"]);
+  assert.deepEqual(piArgs(["install", "npm:@a-tether/pi"]), ["install", "npm:@a-tether/pi"]);
 });
 
 test("pi-tether only uses an existing pi and never installs one", async t => {
