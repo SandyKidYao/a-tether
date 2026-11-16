@@ -27,11 +27,19 @@
 ```sh
 npm run build        # 编译并生成 packages/*/dist，版本号取根 package.json
 npm run pack:dry     # 构建并列出两个包将发布的文件
-npm publish ./packages/a-tether-server
-npm publish ./packages/pi-tether
 ```
 
-两个包同版本发布。`pi-tether` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
+两个包同版本发布，由 GitHub Actions 自动完成：
+
+1. 本地先跑 `npm run test:live`（CI 没有 Claude 账户，不跑真实验收）。
+2. `npm version patch`（或 `minor`），更新根 `package.json` 并打 `vX.Y.Z` tag。
+3. `git push --follow-tags`。`publish.yml` 校验 tag 与版本一致，运行检查、测试和构建，再用 npm Trusted Publishing 发布两个包。已发布的版本会跳过，失败后可直接重跑。
+
+`ci.yml` 在推送到 main 和 PR 时运行检查、测试和打包预览。
+
+首次发布需手动完成：`npm login` 后运行 `npm run build`、`npm publish ./packages/a-tether-server --access public`、`npm publish ./packages/pi-tether --access public`。然后在 npmjs.com 上为两个包分别配置 Trusted Publisher（GitHub Actions，仓库 `SandyKidYao/a-tether`，workflow `publish.yml`，environment `npm`），并在 GitHub 仓库中创建名为 `npm` 的 Environment，可设置人工审批。
+
+`pi-tether` 把 Pi 提供的 `@earendil-works/*` 声明为可选 peer 依赖，不会安装 Pi。
 
 ## 复验
 

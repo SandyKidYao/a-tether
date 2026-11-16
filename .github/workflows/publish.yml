@@ -1,0 +1,46 @@
+name: Publish
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # OIDC for npm Trusted Publishing; no npm token is stored
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing needs npm 11.5.1+; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - name: Tag must match package.json version
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $V"
+            exit 1
+          fi
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Publish packages (skips versions already on npm, so reruns are safe)
+        run: |
+          V=$(node -p "require('./package.json').version")
+          for p in a-tether-server pi-tether; do
+            if npm view "$p@$V" version >/dev/null 2>&1; then
+              echo "$p@$V already published, skipping"
+              continue
+            fi
+            npm publish "./packages/$p" --access public
+          done
