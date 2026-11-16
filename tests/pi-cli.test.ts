@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {findPi, piArgs} from "../src/frontends/pi/cli.ts";
 
-test("pi-tether adds the extension and default model, but passes subcommands through", () => {
+test("a-tether-pi adds the extension and default model, but passes subcommands through", () => {
   const [flag, extension, ...rest] = piArgs(["-p", "hi"]);
   assert.equal(flag, "-e");
   assert.match(extension, /extension\.ts$/);
@@ -15,8 +15,8 @@ test("pi-tether adds the extension and default model, but passes subcommands thr
   assert.deepEqual(piArgs(["install", "npm:@a-tether/pi"]), ["install", "npm:@a-tether/pi"]);
 });
 
-test("pi-tether only uses an existing pi and never installs one", async t => {
-  const dir = await mkdtemp(join(tmpdir(), "pi-tether-"));
+test("a-tether-pi only uses an existing pi and never installs one", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "a-tether-pi-"));
   t.after(() => rm(dir, {recursive: true, force: true}));
   assert.equal(findPi({PATH: dir}), undefined);
   const pi = join(dir, "pi");
@@ -24,6 +24,6 @@ test("pi-tether only uses an existing pi and never installs one", async t => {
   assert.equal(findPi({PATH: dir}), undefined, "not executable");
   await chmod(pi, 0o755);
   assert.equal(findPi({PATH: dir}), pi);
-  assert.equal(findPi({PATH: "", PI_TETHER_PI: pi}), pi);
-  assert.equal(findPi({PATH: dir, PI_TETHER_PI: join(dir, "missing")}), undefined);
+  assert.equal(findPi({PATH: "", A_TETHER_PI: pi}), pi);
+  assert.equal(findPi({PATH: dir, A_TETHER_PI: join(dir, "missing")}), undefined);
 });

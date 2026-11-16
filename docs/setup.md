@@ -4,7 +4,7 @@
 
 以下命令适用于 macOS 的 zsh 或 Linux 的 bash。两端准备 Node.js 22.19+。已验证 Pi 1.5.2、Claude Code 2.1.323、Node.js 22.23.4。C 需要运行 SSH 服务并允许本地端口转发。
 
-A-tether 发布为两个 npm 包：C 端用 `@a-tether/server`（命令 `a-tether-server`），A 端用 `@a-tether/pi`（命令 `pi-tether`）。两端的包版本应保持一致。
+A-tether 发布为两个 npm 包：C 端用 `@a-tether/server`（命令 `a-tether-server`），A 端用 `@a-tether/pi`（命令 `a-tether-pi`）。两端的包版本应保持一致。
 
 ## 1. 在 C 启动服务
 
@@ -32,7 +32,7 @@ ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCount
 
 ## 3. 在 A 的项目里启动 Pi
 
-A 上需要先**自行安装 Pi**，`pi-tether` 不会替你安装。确认 `pi --version` 可以运行：
+A 上需要先**自行安装 Pi**，`a-tether-pi` 不会替你安装。确认 `pi --version` 可以运行：
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent
@@ -47,7 +47,7 @@ cd /path/to/your/project
 npx -y @a-tether/pi
 ```
 
-`pi-tether` 会找到 PATH 中的 `pi`，加载 A-tether 插件并默认选用 `a-tether/default`。其余参数原样传给 Pi，例如 `npx @a-tether/pi --model a-tether/claude-opus-5-5`。如果 `pi` 不在 PATH 中，可设置 `PI_TETHER_PI` 为它的绝对路径。
+`a-tether-pi` 会找到 PATH 中的 `pi`，加载 A-tether 插件并默认选用 `a-tether/default`。其余参数原样传给 Pi，例如 `npx @a-tether/pi --model a-tether/claude-opus-5-5`。如果 `pi` 不在 PATH 中，可设置 `A_TETHER_PI` 为它的绝对路径。
 
 也可以把插件持久安装到 Pi，之后直接运行 `pi` 并用 `/model` 选择 A-tether 模型：
 

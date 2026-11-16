@@ -16,7 +16,7 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "pi-tether": "dist/frontends/pi/cli.js"
+    "a-tether-pi": "dist/frontends/pi/cli.js"
   },
   "files": [
     "dist",

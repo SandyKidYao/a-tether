@@ -18,7 +18,7 @@ function executable(file: string) {
 }
 
 export function findPi(env: NodeJS.ProcessEnv = process.env) {
-  if (env.PI_TETHER_PI) return executable(env.PI_TETHER_PI) ? env.PI_TETHER_PI : undefined;
+  if (env.A_TETHER_PI) return executable(env.A_TETHER_PI) ? env.A_TETHER_PI : undefined;
   const names = windows ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
   for (const dir of (env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
@@ -39,11 +39,11 @@ function main() {
   const pi = findPi();
   if (!pi) {
     console.error([
-      "pi-tether 需要本机已安装的 Pi，但在 PATH 中找不到 pi 命令。",
+      "a-tether-pi 需要本机已安装的 Pi，但在 PATH 中找不到 pi 命令。",
       "请先自行安装 Pi，例如：",
       "  npm install -g @earendil-works/pi-coding-agent",
-      "安装后确认 `pi --version` 可以运行，再重新执行 pi-tether。",
-      "如果 pi 不在 PATH 中，可设置 PI_TETHER_PI 为它的绝对路径。",
+      "安装后确认 `pi --version` 可以运行，再重新执行 a-tether-pi。",
+      "如果 pi 不在 PATH 中，可设置 A_TETHER_PI 为它的绝对路径。",
     ].join("\n"));
     process.exit(1);
   }
