@@ -6,8 +6,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Backend, BackendModel } from "../backends/backend.ts";
-import { generationOptions, uuid, wireEvent, type Code } from "../shared/protocol.ts";
-import { isLoopback, validToken } from "../shared/settings.ts";
+import { generationOptions, header, protocol, uuid, wireEvent, type Code } from "../shared/protocol.ts";
+import { isLoopback, loadSettings, validToken } from "../shared/settings.ts";
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, {"content-type": "application/json", "cache-control": "no-store"}).end(JSON.stringify(data));
@@ -21,6 +21,12 @@ export function clip(text: string) { return text.replace(/\s+/g, " ").trim().sli
 function logError(id: string, code: string, detail = "") {
   const text = clip(detail);
   console.error(`${new Date().toISOString()} ${id ? id.slice(0, 8) : "--------"} ${code}${text ? ": " + text : ""}`);
+}
+// Aborts carry a reason: A cancelled or went away ("cancelled"), or stopped beating ("lost").
+function asFailure(error: unknown, reason: unknown) {
+  return error instanceof Failure ? error
+    : reason === "cancelled" || reason === "lost" ? new Failure(499, reason)
+    : new Failure(502, "backend", describe(error));
 }
 function describe(error: unknown) {
   return error instanceof Failure ? error.detail : error instanceof Error ? error.message : typeof error === "string" ? error : "";
@@ -66,7 +72,8 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
 
   const directory = await mkdtemp(join(tmpdir(), "a-tether-"));
   process.chdir(directory);
-  const active = new Map<string, AbortController>();
+  // Each streaming request, with the time A's last heartbeat for it arrived.
+  const active = new Map<string, {controller: AbortController; heard: number}>();
   const pending = new Set<Promise<void>>();
   const controllers = new Set<AbortController>();
 
@@ -84,67 +91,90 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
 
   async function handle(req: IncomingMessage, res: ServerResponse, controller: AbortController) {
     if (!timingSafeEqual(digest(req.headers.authorization ?? ""), expected)) throw new Failure(401, "unauthorized");
+    const version = req.headers[header.protocol];
+    if (version !== protocol) throw new Failure(400, "version", "A speaks protocol " + (version ?? "(none)") + ", C speaks " + protocol);
     const signal = controller.signal;
     if (req.method === "GET" && req.url === "/v1/health") {
       const {available, loggedIn, diagnostic} = await backend.status(signal);
       return json(res, 200, {available, loggedIn, diagnostic, ...(backend.stats ? {sessions: backend.stats()} : {})});
     }
     if (req.method === "GET" && req.url === "/v1/models") return json(res, 200, (await models(signal)).map(({route, ...model}) => model));
-    const cancelId = req.url?.slice("/v1/requests/".length) ?? "";
-    if (req.method === "DELETE" && req.url?.startsWith("/v1/requests/") && uuid.test(cancelId)) {
-      active.get(cancelId)?.abort("cancelled");
-      return json(res, 200, {id: cancelId});
+    const [, target, action] = /^\/v1\/requests\/([^/]+)(?:\/(heartbeat))?$/.exec(req.url ?? "") ?? [];
+    if (target && uuid.test(target)) {
+      if (req.method === "DELETE" && !action) {
+        active.get(target)?.controller.abort("cancelled");
+        return json(res, 200, {id: target});
+      }
+      if (req.method === "POST" && action) {
+        const entry = active.get(target);
+        if (!entry) throw new Failure(404, "invalid");
+        entry.heard = Date.now();
+        return json(res, 200, {id: target});
+      }
     }
     if (req.method !== "POST" || req.url !== "/v1/requests") throw new Failure(404, "invalid");
     const body = await readRequest(req);
     if (!body || typeof body.id !== "string" || !uuid.test(body.id) || !Array.isArray(body.context?.messages)) throw new Failure(400, "invalid");
     const id = body.id;
     if (active.has(id)) throw new Failure(409, "duplicate");
-    active.set(id, controller);
-    const timer = setTimeout(() => controller.abort("timeout"), 300_000);
+    const {heartbeatInterval, heartbeatTimeout} = loadSettings().server;
+    const interval = heartbeatInterval * 1000, timeout = heartbeatTimeout * 1000;
+    const entry = {controller, heard: Date.now()};
+    active.set(id, entry);
+    // From here on every outcome, failures included, is a frame on the stream. There
+    // is no limit on the request's length: heartbeats tell a slow model from a dead peer.
+    res.writeHead(200, {"content-type": "application/x-ndjson", "cache-control": "no-store",
+      [header.interval]: String(interval), [header.timeout]: String(timeout)});
+    res.flushHeaders();
+    const send = (frame: object) => res.destroyed || res.write(JSON.stringify({id, ...frame}) + "\n");
+    const started = Date.now();
+    let output = started, seq = 0, ended = false;
+    const detail = (code: string) => code === "lost" ? `no heartbeat from A for ${Math.round((Date.now() - entry.heard) / 1000)}s` : "";
+    const beat = setInterval(() => {
+      const now = Date.now();
+      if (now - entry.heard > timeout) return controller.abort("lost");
+      send({type: "heartbeat", seq: ++seq, elapsed: now - started, modelIdle: now - output, clientIdle: now - entry.heard});
+    }, interval);
     try {
       const model = (await models(signal)).find(m => m.id === body.model);
       signal.throwIfAborted();
       if (!model) throw new Failure(400, "invalid", "unknown model");
-      res.writeHead(200, {"content-type": "application/x-ndjson", "cache-control": "no-store"});
-      res.flushHeaders();
       const stream = backend.stream(model, normalizeContext({messages: body.context.messages}), {
         ...generationOptions(body.options), signal,
       });
       try {
         for await (const event of stream) {
+          output = Date.now();
           if (event.type === "error") {
             const code = signal.aborted ? signal.reason : backend.errorCode(event.error.errorMessage ?? "");
-            logError(id, code, signal.aborted ? "" : event.error.errorMessage);
-            if (!res.destroyed) res.write(JSON.stringify({id, type: "error", code}) + "\n");
+            logError(id, code, signal.aborted ? detail(code) : event.error.errorMessage);
+            ended = true;
+            send({type: "error", code});
             continue;
           }
-          if (res.destroyed) continue;
-          const frame = {id, type: event.type === "done" ? "done" : "event", event: wireEvent(event)};
-          if (!res.write(JSON.stringify(frame) + "\n") && !signal.aborted) await once(res, "drain", {signal});
+          ended ||= event.type === "done";
+          if (!send({type: event.type === "done" ? "done" : "event", event: wireEvent(event)}) && !signal.aborted) await once(res, "drain", {signal});
         }
       } finally {
         controller.abort("cancelled");
         await stream.result();
       }
-      res.end();
     } catch (error) {
-      (error as {requestId?: string}).requestId = id;
-      throw error;
-    } finally { clearTimeout(timer); active.delete(id); }
+      const failure = asFailure(error, signal.reason);
+      logError(id, failure.code, failure.detail || detail(failure.code));
+      if (!ended) send({type: "error", code: failure.code});
+    } finally { clearInterval(beat); active.delete(id); }
+    res.end();
   }
 
   const server = createServer((req, res) => {
     const controller = new AbortController();
     controllers.add(controller);
+    res.setHeader(header.protocol, protocol);
     res.once("close", () => controller.abort("cancelled"));
     const task = handle(req, res, controller).catch(error => {
-      const reason = controller.signal.reason;
-      const failure = error instanceof Failure ? error
-        : reason === "timeout" ? new Failure(504, "timeout")
-        : reason === "cancelled" ? new Failure(499, "cancelled")
-        : new Failure(502, "backend", describe(error));
-      logError((error as {requestId?: string})?.requestId ?? "", failure.code, failure.detail);
+      const failure = asFailure(error, controller.signal.reason);
+      logError("", failure.code, failure.detail);
       if (res.destroyed) return;
       if (res.headersSent) return res.destroy();
       json(res, failure.status, {code: failure.code});

@@ -18,10 +18,24 @@ v0.1 默认两端只使用回环地址，通过端口转发（推荐 SSH 本地�
 | GET /v1/models | 返回 C 发现的模型以及 Pi 注册模型所需的能力字段 |
 | POST /v1/requests | 接受 A 生成的 UUID、模型 ID、上下文及白名单生成选项，逐行返回 JSON |
 | DELETE /v1/requests/{id} | 幂等取消，触发与连接断开相同的清理 |
+| POST /v1/requests/{id}/heartbeat | A 的心跳；请求不存在时返回 404 |
 
-每行响应都带请求 ID。event 承载增量，done 承载权威的 Pi 最终消息，error 承载稳定错误码。每轮恰有一个终态，提前 EOF 在 A 显示为连接中断。A 只将最终消息中的工具调用交给 Pi，工具结果随下一轮完整上下文提交。C 从本地目录选择模型定义和 CLI 配置，仅接受白名单字段。
+每行响应都带请求 ID。event 承载增量，done 承载权威的 Pi 最终消息，error 承载稳定错误码，heartbeat 是心跳。每轮恰有一个终态，提前 EOF 在 A 显示为连接中途断开。C 读完请求体就返回响应头，此后模型查找失败等所有结果都以 error 行返回。A 只将最终消息中的工具调用交给 Pi，工具结果随下一轮完整上下文提交。C 从本地目录选择模型定义和 CLI 配置，仅接受白名单字段。
 
-服务端为每个活跃请求维护 AbortController。生成过程中的取消、断连和超时会结束这个会话的 Claude 进程；服务退出时结束所有进程，并等待进程组与临时目录清理。认证失败、Claude 未登录、额度耗尽和后端故障分别呈现。服务默认仅打印启动状态和监听端口。
+### 版本与心跳
+
+两端在每个请求和响应上都带 `a-tether-protocol` 头（当前为 `2`），值不一致时 C 返回错误码 `version`，A 显示版本不一致；两端须同时升级。
+
+心跳独立于模型输出，用来区分「模型在长时间思考」和「连接或对端已失效」。请求没有总时长上限。C 在 POST /v1/requests 的响应头里给出 `a-tether-heartbeat-interval` 和 `a-tether-heartbeat-timeout`（毫秒，来自 C 的 `server.heartbeatInterval` 和 `server.heartbeatTimeout`），之后：
+
+- C 每个间隔向流中写一行 `{"id","type":"heartbeat","seq","elapsed","modelIdle","clientIdle"}`：序号、请求已运行的时间、模型多久没有输出、多久前收到 A 的心跳（毫秒）。
+- A 每个间隔向 POST /v1/requests/{id}/heartbeat 发一次心跳，每次最多等待一个间隔。
+- A 在超过时限没有从流中收到任何字节时放弃请求，错误信息引用最后一次心跳的内容，并尽力发送 DELETE 让 C 立即清理。
+- C 在超过时限没有收到 A 的心跳时以原因 `lost` 中止请求，结束 Claude 进程，日志记为 `lost: no heartbeat from A for Ns`。
+
+连接类错误（无法连接、心跳中断、中途断开、`lost`）的提示包含 Pi 自动重试能识别的英文短语，由 Pi 按退避重发；格式错误、版本不一致等不会重试。
+
+服务端为每个活跃请求维护 AbortController。生成过程中的取消、断连和心跳中断会结束这个会话的 Claude 进程；服务退出时结束所有进程，并等待进程组与临时目录清理。认证失败、Claude 未登录、额度耗尽和后端故障分别呈现。服务默认仅打印启动状态和监听端口。
 
 ## 联调判据
 

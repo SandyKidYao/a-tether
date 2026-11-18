@@ -12,7 +12,7 @@ import {setTimeout as delay} from "node:timers/promises";
 import {isLoopback, loadSettings, saveToken, SettingsError} from "../src/shared/settings.ts";
 import {findPi, login} from "../src/frontends/pi/cli.ts";
 import {request} from "../src/client/http.ts";
-import {messages} from "../src/shared/protocol.ts";
+import {header, messages, protocol} from "../src/shared/protocol.ts";
 import {useHome, writeSettings} from "./helpers.ts";
 
 const claude = fileURLToPath(new URL("./fixtures/claude.mjs", import.meta.url));
@@ -54,12 +54,15 @@ async function runServer(dir: string, args: string[] = [], env: Record<string, s
 test("settings fall back to defaults and client.url follows server.port", async t => {
   const dir = await home(t);
   assert.deepEqual(loadSettings(file(dir)), {token: undefined,
-    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false, maxSessions: 16},
+    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false, maxSessions: 16, heartbeatInterval: 10, heartbeatTimeout: 30},
     client: {url: "http://127.0.0.1:7310", pi: undefined}});
   await writeSettings(dir, {token, server: {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4, future: 1},
     client: {pi: "/x/pi"}, unknown: true});
   const s = loadSettings(file(dir));
-  assert.deepEqual(s.server, {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4});
+  assert.deepEqual(s.server, {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4,
+    heartbeatInterval: 10, heartbeatTimeout: 30});
+  await writeSettings(dir, {server: {heartbeatInterval: 20}});
+  assert.equal(loadSettings(file(dir)).server.heartbeatTimeout, 60, "the default timeout follows a longer interval");
   assert.deepEqual(s.client, {url: "http://127.0.0.1:7400", pi: "/x/pi"});
   await writeSettings(dir, {client: {url: "http://192.168.1.20:7310/"}});
   assert.equal(loadSettings(file(dir)).client.url, "http://192.168.1.20:7310", "S11: LAN hosts are allowed");
@@ -77,6 +80,10 @@ test("S4: invalid settings are rejected with the file and field named", async t 
     [{server: {maxSessions: 1.5}}, /server\.maxSessions/],
     [{server: {maxSessions: -1}}, /server\.maxSessions/],
     [{server: {claude: ""}}, /server\.claude/],
+    [{server: {heartbeatInterval: 0}}, /server\.heartbeatInterval/],
+    [{server: {heartbeatInterval: 2.5}}, /server\.heartbeatInterval/],
+    [{server: {heartbeatInterval: 10, heartbeatTimeout: 15}}, /server\.heartbeatTimeout/],
+    [{server: {heartbeatTimeout: "30"}}, /server\.heartbeatTimeout/],
     [{server: []}, /server 必须是对象/],
     [{client: {url: "https://127.0.0.1:7310"}}, /client\.url/],
     [{client: {url: "http://u:p@127.0.0.1:7310"}}, /client\.url/],
@@ -181,7 +188,7 @@ test("S7/S9/S10: Pi explains a missing or wrong token and picks up login without
   const good = "c".repeat(64);
   const server = createHttpServer((req, res) => {
     const ok = req.headers.authorization === "Bearer " + good;
-    res.writeHead(ok ? 200 : 401, {"content-type": "application/json"}).end(JSON.stringify(ok ? {loggedIn: true} : {code: "unauthorized"}));
+    res.writeHead(ok ? 200 : 401, {"content-type": "application/json", [header.protocol]: protocol}).end(JSON.stringify(ok ? {loggedIn: true} : {code: "unauthorized"}));
   }).listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => server.close());

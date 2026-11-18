@@ -12,6 +12,7 @@ import {normalizeContext} from "@earendil-works/pi-ai";
 import {backendCode} from "../src/backends/claude-code/index.ts";
 import {getClaudeStatus} from "../src/backends/claude-code/claude-process.ts";
 import {catalogCache, Failure} from "../src/server/http.ts";
+import {header, protocol} from "../src/shared/protocol.ts";
 import {useHome, writeSettings} from "./helpers.ts";
 
 test("backend errors are classified into specific codes", () => {
@@ -91,7 +92,7 @@ for await (const line of createInterface({input:process.stdin})) {
   const marker = "secret-content-" + randomUUID();
   const id = randomUUID();
   const res = await fetch(`http://127.0.0.1:${port}/v1/requests`, {
-    method: "POST", headers: {authorization: "Bearer " + token},
+    method: "POST", headers: {authorization: "Bearer " + token, [header.protocol]: protocol},
     body: JSON.stringify({id, model: "default", context: normalizeContext({messages: [{role: "user", content: marker, timestamp: 0}]})}),
   });
   assert.match(await res.text(), /"code":"overloaded"/);

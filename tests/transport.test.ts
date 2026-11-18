@@ -12,7 +12,7 @@ import {fileURLToPath} from "node:url";
 import {setTimeout as delay} from "node:timers/promises";
 import {normalizeContext} from "@earendil-works/pi-ai";
 import {remoteStream} from "../src/frontends/pi/extension.ts";
-import {messages} from "../src/shared/protocol.ts";
+import {header, messages, protocol} from "../src/shared/protocol.ts";
 import {useHome, writeSettings} from "./helpers.ts";
 
 async function until(predicate: () => boolean) {
@@ -50,9 +50,13 @@ test("authenticated provider cancellation and disconnect reap C workers", {timeo
   });
   useHome(t, dir);
   await until(() => logs.includes("listening"));
-  const headers = {authorization:"Bearer " + token};
+  const headers = {authorization:"Bearer " + token, [header.protocol]:protocol};
   assert.equal((await fetch(url+"/v1/health")).status,401);
-  assert.equal((await fetch(url+"/v1/health",{headers:{authorization:"Bearer " + leftover}})).status,401, "0.1.0 variables are ignored");
+  assert.equal((await fetch(url+"/v1/health",{headers:{...headers, authorization:"Bearer " + leftover}})).status,401, "0.1.0 variables are ignored");
+  const stale = await fetch(url+"/v1/health",{headers:{authorization:"Bearer " + token}});
+  assert.equal(stale.status,400, "an A without the protocol header is refused");
+  assert.deepEqual(await stale.json(),{code:"version"});
+  assert.equal(stale.headers.get(header.protocol),protocol);
   const models = await (await fetch(url+"/v1/models",{headers})).json();
   const context = normalizeContext({messages:[{role:"user",content:marker,timestamp:Date.now()}]});
   let workingDir = "";

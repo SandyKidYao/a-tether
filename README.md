@@ -78,7 +78,7 @@ pi
 ```json
 {
   "token": "由服务生成，或由 login 写入",
-  "server": { "host": "127.0.0.1", "port": 7310, "claude": "/usr/local/bin/claude", "allowUsageCredits": false, "maxSessions": 16 },
+  "server": { "host": "127.0.0.1", "port": 7310, "claude": "/usr/local/bin/claude", "allowUsageCredits": false, "maxSessions": 16, "heartbeatInterval": 10, "heartbeatTimeout": 30 },
   "client": { "url": "http://127.0.0.1:7310", "pi": "/usr/local/bin/pi" }
 }
 ```
@@ -91,10 +91,12 @@ pi
 | `server.claude` | C | Claude Code CLI 的路径，服务进程的 PATH 里找不到 `claude` 时填写绝对路径。 | `claude` |
 | `server.allowUsageCredits` | C | Claude 账户开始使用超额计费额度时是否继续。为 `false` 时中止请求，避免产生额外费用。 | `false` |
 | `server.maxSessions` | C | 同时保留的 Claude 进程数（0–256），每个约占 50 MB 内存。满了以后回收最久没用的会话，下次用到它时从完整历史重建。设为 `0` 时每次请求都用一次性进程。 | `16` |
+| `server.heartbeatInterval` | C | 心跳间隔（秒，1–600）。请求进行中，C 和 A 每隔这么久互相发一次心跳，与模型有没有输出无关。 | `10` |
+| `server.heartbeatTimeout` | C | 心跳时限（秒，不小于间隔的 2 倍，最多 3600）。A 这么久收不到 C 的任何数据，或 C 这么久收不到 A 的心跳，就判定连接中断并结束请求。网络抖动较多（如经中继的 VPN）时调大。 | `30`，或间隔的 3 倍（取较大者） |
 | `client.url` | A | Pi 连接的地址，形如 `http://127.0.0.1:7310`。 | `http://127.0.0.1:` 加 `server.port` |
 | `client.pi` | A | `npx -y @a-tether/pi` 使用的 Pi 路径，Pi 不在 PATH 里时填写绝对路径。 | 在 PATH 中查找 |
 
-- `token`、`server.host`、`server.port` 改后需要重启服务；`server.claude`、`server.allowUsageCredits`、`server.maxSessions` 在服务下一次处理请求时生效。
+- `token`、`server.host`、`server.port` 改后需要重启服务；`server.claude`、`server.allowUsageCredits`、`server.maxSessions`、`server.heartbeatInterval`、`server.heartbeatTimeout` 在服务下一次处理请求时生效。两个心跳参数只在 C 上配置，C 随每个请求告诉 A。
 - A 端的 `token`、`client.url` 在 Pi 的下一次请求时生效，不用重启 Pi；`client.pi` 在下次运行 `npx -y @a-tether/pi` 时生效。
 - 文件写错（不是合法 JSON、字段类型不对）时，服务拒绝启动，Pi 报错，都会指出出错的字段。文件不会被自动覆盖。
 - **监听局域网地址**：把 `server.host` 设成 `0.0.0.0` 或局域网 IP 后，A 可以不经端口转发，用 `client.url` 直接连接 C。但令牌会以明文 HTTP 在局域网里传输，同一网络中的设备都能尝试连接，服务启动时也会提醒这一点。只在可信网络里这样用。
@@ -115,12 +117,18 @@ npx -y @a-tether/pi --version       # A：显示插件版本和本机 Pi 的版�
 
 先在 Pi 中运行 `/a-tether-status`，它会显示具体原因。
 
+连接类错误（无法连接、心跳中断、中途断开）的提示里带有 `connection error` 或 `connection lost` 字样，Pi 的自动重试会识别它们并按退避重发；其他错误不会自动重试。
+
 | 现象 | 处理 |
 | --- | --- |
 | 「还没有配置令牌」 | 在 C 上运行 `npx -y @a-tether/server token`，把它打印的命令拿到 A 上运行。 |
 | 「令牌与 C 端不一致」 | 同上，重新 `login`。C 的 settings.json 被删除或改过令牌后会出现这个提示。 |
-| 「连接中断」 | 检查 C 的服务终端和 A 的端口转发是否还在运行；A 的 `client.url` 端口要等于转发在 A 上的端口。转发恢复后在 Pi 里重发。 |
-| `/model` 提示 `Could not refresh a-tether` | 同上，用 `/a-tether-status` 查看具体原因。 |
+| 「无法连接 C 的 A-tether 服务」 | 检查 C 的服务终端和 A 的端口转发是否还在运行；A 的 `client.url` 端口要等于转发在 A 上的端口。 |
+| 「已 N 秒没有收到 C 的任何数据」 | 心跳中断：网络或端口转发断了，或 C 停止响应（例如 C 进入睡眠）。提示里附有最后一次心跳的情况：「C x 秒前收到过 A 的心跳」中的 x 较大，说明 A 到 C 方向已经不通。模型长时间思考不会触发这个提示。 |
+| 「与 C 的连接在响应中途断开」 | 连接被关闭，通常是端口转发断开或 C 端服务退出。 |
+| 「C 超过心跳时限没有收到 A 的心跳」 | C 端判定 A 失联并结束了 Claude 进程，C 日志中对应请求为 `lost: no heartbeat from A`。 |
+| 「版本不一致」 | 两端必须使用同一版本，按「查看版本」一节检查并升级。 |
+| `/model` 提示 `Could not refresh a-tether` | 同「无法连接」，用 `/a-tether-status` 查看具体原因。 |
 | C 上找不到 Claude Code 或未登录 | 在运行服务的 C 账户里运行 `claude auth status`。PATH 不同时，在 C 的 settings.json 里设置 `server.claude` 为绝对路径，然后重启服务。 |
 | 后端错误或无模型目录 | 看 C 服务终端里对应请求 ID 的诊断行。检查 C 能访问模型服务、`claude` 能正常运行，以及 C 是否设置了自定义后端地址或非 Claude 登录的认证变量。 |
 | 模型服务繁忙 | 上游过载或返回 5xx，稍后重试。 |
@@ -130,7 +138,7 @@ npx -y @a-tether/pi --version       # A：显示插件版本和本机 Pi 的版�
 
 ## 已知限制
 
-- 单次模型请求最长五分钟（只计生成时间，不含 Pi 执行工具和等待输入的时间）。
+- 单次模型请求没有时长上限，模型可以长时间思考。连接是否存活由心跳判断（见「配置文件」中的 `server.heartbeatInterval`）。
 - Claude 进程只能接着 Pi 的历史往下走。Pi 压缩上下文、切换分支、编辑或重试消息、换模型或推理强度、修改系统提示，以及按 Esc 取消之后，C 会用完整历史重新启动一个进程，这一轮会慢一些。
 - 0.1.1 已在两台电脑之间按本文步骤完成端到端验证（初始化、login、真实对话）。SSH 隧道断线时的处理在同一台 Mac 上用独立进程验证过。Windows 不在支持范围内。
 - 停止服务请用 Ctrl+C 或 SIGTERM，服务会清理正在运行的 Claude 进程和临时文件。
