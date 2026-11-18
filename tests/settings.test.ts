@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {spawn} from "node:child_process";
+import {spawn, spawnSync} from "node:child_process";
 import {once} from "node:events";
 import {createServer as createHttpServer} from "node:http";
 import {createServer} from "node:net";
@@ -212,4 +212,18 @@ test("S11: the launcher uses client.pi from settings.json", async t => {
   assert.equal(findPi({PATH: ""}), pi);
   await writeSettings(dir, {client: {pi: join(dir, "missing")}});
   assert.equal(findPi({PATH: ""}), undefined);
+});
+
+test("a-tether-server --version works even with a broken settings.json", async t => {
+  const dir = await mkdtemp(join(tmpdir(), "tether-version-"));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  await mkdir(join(dir, ".a-tether"));
+  await writeFile(join(dir, ".a-tether", "settings.json"), "{broken");
+  const expected = JSON.parse(await readFile("package.json", "utf8")).version;
+  for (const flag of ["--version", "-v"]) {
+    const run = spawnSync(process.execPath, ["--experimental-transform-types", "src/server.ts", flag],
+      {env: {PATH: process.env.PATH, HOME: dir}, encoding: "utf8"});
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout.trim(), "a-tether-server " + expected);
+  }
 });

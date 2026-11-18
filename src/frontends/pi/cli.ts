@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Starts the user's own Pi with the A-tether extension. Never installs Pi.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { displayPath, loadSettings, saveToken } from "../../shared/settings.ts";
+import { isVersionFlag, version } from "../../shared/version.ts";
 
 const extension = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./extension.ts" : "./extension.js", import.meta.url));
 const subcommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth", "mcp"]);
@@ -46,8 +47,24 @@ export function login(args: string[]) {
   ].join("\n");
 }
 
+// The launcher's version, then the version of the Pi it would start.
+export function versions(pi: string | undefined) {
+  const lines = ["a-tether-pi " + version];
+  if (!pi) return [...lines, "pi 未找到"];
+  const shell = windows && /\.cmd$/i.test(pi);
+  const result = spawnSync(shell ? `"${pi}"` : pi, ["--version"], {encoding: "utf8", shell});
+  const output = result.status === 0 ? result.stdout.trim() : "";
+  return [...lines, output ? "pi " + output : "pi 版本未知（pi --version 运行失败）"];
+}
+
 function main() {
   const argv = process.argv.slice(2);
+  if (isVersionFlag(argv)) {
+    let pi: string | undefined;
+    try { pi = findPi(); } catch {} // a broken settings.json must not hide the version
+    console.log(versions(pi).join("\n"));
+    return;
+  }
   if (argv[0] === "login") {
     try { console.log(login(argv.slice(1))); }
     catch (error) { console.error((error as Error).message); process.exitCode = 1; }

@@ -30,3 +30,15 @@ test("a-tether-pi only uses an existing pi and never installs one", async t => {
   assert.equal(findPi({PATH: dir}, join(dir, "missing")), undefined);
   assert.equal(findPi({PATH: dir, A_TETHER_PI: join(dir, "missing")}), pi, "the 0.1.0 variable is ignored");
 });
+
+test("--version shows the launcher's version and the Pi it would start", async t => {
+  const {readFile} = await import("node:fs/promises");
+  const {versions} = await import("../src/frontends/pi/cli.ts");
+  const expected = JSON.parse(await readFile("package.json", "utf8")).version;
+  const dir = await mkdtemp(join(tmpdir(), "a-tether-version-"));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const pi = join(dir, "pi");
+  await writeFile(pi, "#!/bin/sh\n[ \"$1\" = --version ] && echo 9.9.9\n", {mode: 0o755});
+  assert.deepEqual(versions(pi), ["a-tether-pi " + expected, "pi 9.9.9"]);
+  assert.deepEqual(versions(undefined), ["a-tether-pi " + expected, "pi 未找到"]);
+});

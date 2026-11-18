@@ -2,17 +2,20 @@
 import { claudeCode } from "./backends/claude-code/index.ts";
 import { runServer } from "./server/http.ts";
 import { displayPath, generateToken, loadSettings, loginCommand, saveToken } from "./shared/settings.ts";
+import { isVersionFlag, version } from "./shared/version.ts";
 
 const showToken = "npx -y @a-tether/server token";
 
 function main(args: string[]) {
+  // Before reading settings, so a broken settings.json still shows the version.
+  if (isVersionFlag(args)) return console.log("a-tether-server " + version);
   const settings = loadSettings();
   if (args[0] === "token" && args.length === 1) {
     if (!settings.token) throw new Error(`还没有令牌。运行 npx -y @a-tether/server 启动服务时会自动生成并保存到 ${displayPath}。`);
     console.log(["在 A 端电脑上运行下面这行（同一台电脑上使用 Pi 无需运行）：", "", "  " + loginCommand(settings.token), ""].join("\n"));
     return;
   }
-  if (args.length) throw new Error("用法：a-tether-server        启动服务\n      a-tether-server token  显示 A 端的配置命令");
+  if (args.length) throw new Error("用法：a-tether-server            启动服务\n      a-tether-server token      显示 A 端的配置命令\n      a-tether-server --version  显示版本");
   let token = settings.token;
   if (token) console.log(`令牌：已配置（${displayPath}）。查看 A 端配置命令：${showToken}`);
   else {

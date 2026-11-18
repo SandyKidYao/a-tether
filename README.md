@@ -102,6 +102,15 @@ pi
 
 **从 0.1.0 升级**：`A_TETHER_TOKEN`、`A_TETHER_URL`、`A_TETHER_PORT`、`A_TETHER_CLAUDE`、`A_TETHER_PI` 这几个环境变量不再生效，旧的 `~/.config/a-tether/token` 也不再读取。在 C 上启动新版服务会生成新令牌，按提示在 A 上重新 `login` 一次即可。
 
+## 查看版本
+
+```sh
+npx -y @a-tether/server --version   # C：显示服务版本
+npx -y @a-tether/pi --version       # A：显示插件版本和本机 Pi 的版本
+```
+
+`-v` 与 `--version` 相同。npx 可能一直用缓存里的旧版本，显示的不是最新版时，在包名后加 `@latest` 运行一次，例如 `npx -y @a-tether/server@latest`。用 `pi install` 安装的插件，运行 `pi update npm:@a-tether/pi` 更新。
+
 ## 故障排查
 
 先在 Pi 中运行 `/a-tether-status`，它会显示具体原因。
