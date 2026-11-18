@@ -9,7 +9,9 @@ import {loadSettings} from "../../shared/settings.ts";
 
 // Present the conversation in order, retaining call IDs and images. Do not forward
 // provider diagnostics, local tool details, or session bookkeeping to Claude.
-function userInput(context:TranscriptContext) {
+// History names tools the way Claude must call them, so the model does not copy
+// Pi's bare names into new calls.
+function userInput(context:TranscriptContext, toolName:(name:string)=>string) {
   const blocks: unknown[] = [];
   for (const msg of context.messages) {
     if (msg.role === "system") continue;
@@ -17,10 +19,11 @@ function userInput(context:TranscriptContext) {
     const content = parts.flatMap((p):unknown[]=>{
       if (p.type === "image") return [{type:"image",attachment:true}];
       if (p.type === "thinking") return [];
+      if (p.type === "toolCall") return [{...p,name:toolName(p.name)}];
       return [p];
     });
     const record = msg.role === "toolResult"
-      ? {role:msg.role,toolCallId:msg.toolCallId,name:msg.toolName,isError:msg.isError,content}
+      ? {role:msg.role,toolCallId:msg.toolCallId,name:toolName(msg.toolName),isError:msg.isError,content}
       : {role:msg.role,content};
     blocks.push({type:"text",text:JSON.stringify(record)});
     for (const p of parts) if (p.type === "image") {
@@ -50,7 +53,11 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
       name:transportName(tool.name,index),
       description:tool.description,inputSchema:tool.parameters,
     }));
-    const names = new Map(catalog.map((tool,i)=>["mcp__tether__"+tool.name,tools[i].name]));
+    const claudeNames = new Map(tools.map((tool,i)=>[tool.name,"mcp__tether__"+catalog[i].name]));
+    // A model sometimes drops the MCP prefix. Map bare names back as well; any other
+    // name goes to Pi unchanged, which answers it with a "not found" tool result.
+    const names = new Map(tools.flatMap((tool,i)=>[
+      [tool.name,tool.name],[catalog[i].name,tool.name],["mcp__tether__"+catalog[i].name,tool.name]]));
     const dir = await mkdtemp(join(tmpdir(),"a-tether-turn-"));
     try {
       const file = join(dir,"catalog.json");
@@ -96,7 +103,8 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
         } else throw new Error("Claude final content differs from stream");
       }
       stream.push({type:"start",partial:message});
-      const {code, stderr} = await invoke(args,{signal:options.signal,cwd:dir,input:userInput(context),
+      const input = userInput(context,name=>claudeNames.get(name) ?? name);
+      const {code, stderr} = await invoke(args,{signal:options.signal,cwd:dir,input,
         env:options.maxTokens ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS:String(options.maxTokens)} : {},onLine(line) {
           let envelope;
           try { envelope = JSON.parse(line); } catch { return; } // ignore non-JSON noise on stdout
@@ -143,12 +151,14 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
               if (b.type === "thinking") { finishText("thinking",b.thinking,b.signature); continue; }
               if (b.type === "redacted_thinking") { finishText("thinking","",b.data,true); continue; }
               if (b.type !== "tool_use") continue;
-              const name = names.get(b.name);
-              if (!name) throw new Error("Unexpected Claude tool");
-              if (typeof b.id !== "string" || !b.input || typeof b.input !== "object" || Array.isArray(b.input)) throw new Error("Invalid tool call");
+              if (typeof b.id !== "string" || typeof b.name !== "string") throw new Error("Invalid tool call");
               if (callsSeen.has(b.id)) continue;
               callsSeen.add(b.id);
-              const toolCall = {type:"toolCall" as const,id:b.id,name,arguments:b.input};
+              // Pi owns the tools: it rejects unknown names and validates arguments,
+              // and the model corrects itself on the next turn.
+              const name = names.get(b.name) ?? b.name;
+              const input = b.input && typeof b.input === "object" && !Array.isArray(b.input) ? b.input : {};
+              const toolCall = {type:"toolCall" as const,id:b.id,name,arguments:input};
               const i = message.content.push(toolCall)-1;
               stream.push({type:"toolcall_start",contentIndex:i,partial:message});
               stream.push({type:"toolcall_end",contentIndex:i,toolCall,partial:message});

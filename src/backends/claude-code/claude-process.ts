@@ -1,6 +1,9 @@
 import {spawn} from "node:child_process";
 import {createInterface} from "node:readline";
 import {randomUUID} from "node:crypto";
+import {readFileSync} from "node:fs";
+import {homedir} from "node:os";
+import {join} from "node:path";
 import {getBuiltinModels} from "@earendil-works/pi-ai/providers/all";
 import {api, providerId, defaultUrl} from "../../shared/protocol.ts";
 import {loadSettings} from "../../shared/settings.ts";
@@ -8,6 +11,17 @@ import {loadSettings} from "../../shared/settings.ts";
 export const isolated = ["-p", "--tools", "", "--setting-sources", "", "--strict-mcp-config",
   "--settings", JSON.stringify({disableAllHooks:true}), "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "dontAsk"];
 export const streaming = ["--verbose", "--input-format", "stream-json", "--output-format", "stream-json"];
+
+// Turns run with --setting-sources "", so Claude Code ignores the env block of its own
+// settings.json, while `claude auth status` reads it. A login token kept there must
+// reach every invocation, or status reports logged in and each turn fails.
+function settingsToken(env:NodeJS.ProcessEnv) {
+  try {
+    const file = join(env.CLAUDE_CONFIG_DIR || join(homedir(),".claude"),"settings.json");
+    const token = JSON.parse(readFileSync(file,"utf8"))?.env?.CLAUDE_CODE_OAUTH_TOKEN;
+    return typeof token === "string" && token ? token : undefined;
+  } catch { return undefined; }
+}
 
 type ProcessOptions = {signal?: AbortSignal; cwd?: string; env?: NodeJS.ProcessEnv; input?: string; onLine(line:string):void};
 export async function invoke(args:string[], options:ProcessOptions) {
@@ -21,6 +35,8 @@ export async function invoke(args:string[], options:ProcessOptions) {
       ["CLAUDE_CODE_USE_BEDROCK","CLAUDE_CODE_USE_VERTEX","CLAUDE_CODE_USE_FOUNDRY"].some(k=>env[k] && !["false","0"].includes(env[k]!))) {
     throw new Error("Conflicting backend configuration");
   }
+  const oauth = env.CLAUDE_CODE_OAUTH_TOKEN || settingsToken(env);
+  if (oauth) env.CLAUDE_CODE_OAUTH_TOKEN = oauth;
   Object.assign(env,{ENABLE_TOOL_SEARCH:"false", CLAUDE_CODE_DISABLE_FILE_MENTIONS:"1",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY:"1", CLAUDE_CODE_DISABLE_CLAUDE_MDS:"1", DISABLE_AUTOUPDATER:"1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1", DISABLE_TELEMETRY:"1"});

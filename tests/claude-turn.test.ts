@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {mkdtemp, rm, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {spawnSync} from "node:child_process";
@@ -84,4 +84,68 @@ for(const item of [
   const allowed=await run();
   assert.equal(allowed.stopReason,"stop",allowed.errorMessage);
   assert.deepEqual(allowed.content,[{type:"text",text:"paid answer"}]);
+});
+
+test("history uses MCP tool names, and bare or unknown tool calls reach Pi instead of failing the turn",async t=>{
+  const dir=await mkdtemp(join(tmpdir(),"tether-names-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const command=join(dir,"cli.mjs");
+  await writeFile(command,`#!/usr/bin/env node
+import {readFileSync} from "node:fs";
+const history=JSON.parse(readFileSync(0,"utf8")).message.content.map(b=>b.text ? JSON.parse(b.text) : b);
+const names=history.flatMap(r=>[r.name,...(Array.isArray(r.content) ? r.content.map(c=>c.name) : [])]).filter(Boolean);
+if(names.join()!=="mcp__tether__bash,mcp__tether__bash") process.exit(4);
+for(const item of [
+  {type:"assistant", message:{id:"response",content:[
+    {type:"tool_use",name:"bash",id:"bare",input:{command:"ls"}},
+    {type:"tool_use",name:"Edit",id:"unknown",input:"not an object"}
+  ]}},
+  {type:"result",subtype:"error_max_turns",is_error:true}
+]) console.log(JSON.stringify(item));
+`,{mode:0o700});
+  useHome(t,dir);
+  await writeSettings(dir,{server:{claude:command}});
+  const context=normalizeContext({tools:[{name:"bash",description:"bash",parameters:{type:"object"}}],messages:[
+    {role:"user",content:"list",timestamp:0},
+    {role:"assistant",content:[{type:"toolCall",id:"old",name:"bash",arguments:{command:"pwd"}}],api,provider:providerId,model:"test",
+      usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:"toolUse",timestamp:0},
+    {role:"toolResult",toolCallId:"old",toolName:"bash",content:[{type:"text",text:"/"}],isError:false,timestamp:0},
+  ]});
+  const stream=streamClaudeCode({id:"test",name:"test",api,provider:providerId,baseUrl:defaultUrl,
+    maxTokens:256,contextWindow:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0},reasoning:false,input:["text"]},context,{});
+  for await(const _ of stream);
+  const message=await stream.result();
+  assert.equal(message.stopReason,"toolUse",message.errorMessage);
+  assert.deepEqual(message.content,[
+    {type:"toolCall",id:"bare",name:"bash",arguments:{command:"ls"}},
+    {type:"toolCall",id:"unknown",name:"Edit",arguments:{}},
+  ]);
+});
+
+test("a login token in Claude's own settings.json reaches the isolated CLI",async t=>{
+  const dir=await mkdtemp(join(tmpdir(),"tether-oauth-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  for(const key of ["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CONFIG_DIR"]) {
+    const previous=process.env[key];
+    delete process.env[key];
+    t.after(()=>{ if(previous!==undefined) process.env[key]=previous; });
+  }
+  const command=join(dir,"cli.mjs");
+  await writeFile(command,`#!/usr/bin/env node
+const text=process.env.CLAUDE_CODE_OAUTH_TOKEN==="from-settings" ? "token ok" : "Not logged in";
+for(const item of [
+  {type:"assistant", message:{id:"response",content:[{type:"text",text}]}},
+  {type:"result",subtype:"success",is_error:false}
+]) console.log(JSON.stringify(item));
+`,{mode:0o700});
+  useHome(t,dir);
+  await writeSettings(dir,{server:{claude:command}});
+  await mkdir(join(dir,".claude"));
+  await writeFile(join(dir,".claude","settings.json"),JSON.stringify({env:{CLAUDE_CODE_OAUTH_TOKEN:"from-settings"}}));
+  const stream=streamClaudeCode({id:"test",name:"test",api,provider:providerId,baseUrl:defaultUrl,
+    maxTokens:256,contextWindow:1000,cost:{input:0,output:0,cacheRead:0,cacheWrite:0},reasoning:false,input:["text"]},
+    normalizeContext({messages:[{role:"user",content:"test",timestamp:0}]}),{});
+  for await(const _ of stream);
+  const message=await stream.result();
+  assert.deepEqual(message.content,[{type:"text",text:"token ok"}],message.errorMessage);
 });
