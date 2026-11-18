@@ -167,6 +167,14 @@ test("C beats while the model is silent and stops Claude when A stops beating", 
   clearInterval(beating);
   assert.ok(!text.includes('"type":"error"'), text);
   assert.ok((text.match(/"type":"heartbeat"/g) ?? []).length >= 3, text);
-  assert.equal((await fetch(url + "/v1/requests/" + randomUUID() + "/heartbeat", {method: "POST", headers})).status, 404);
   controller.abort();
+  // A heartbeat that arrives after its request ended gets 404 but leaves no log line,
+  // while a malformed request still logs one.
+  const late = await fetch(url + "/v1/requests/" + randomUUID() + "/heartbeat", {method: "POST", headers});
+  assert.equal(late.status, 404);
+  assert.deepEqual(await late.json(), {code: "invalid"});
+  await fetch(url + "/v1/requests", {method: "POST", headers, body: "not json"}).then(r => r.text());
+  for (let i = 0; i < 100 && !/-------- invalid/.test(logs); i++) await delay(30);
+  await delay(200);
+  assert.equal((logs.match(/-------- invalid/g) ?? []).length, 1, logs);
 });

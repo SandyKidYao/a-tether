@@ -106,8 +106,10 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
         return json(res, 200, {id: target});
       }
       if (req.method === "POST" && action) {
+        // A heartbeat may race the request's end: A sent it before the done frame
+        // arrived. Answer 404 as the protocol says, but it is no failure worth a log line.
         const entry = active.get(target);
-        if (!entry) throw new Failure(404, "invalid");
+        if (!entry) return json(res, 404, {code: "invalid"});
         entry.heard = Date.now();
         return json(res, 200, {id: target});
       }
