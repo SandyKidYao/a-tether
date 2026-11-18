@@ -11,7 +11,7 @@ execFileSync(process.execPath, [join(root, "node_modules/typescript/bin/tsc"), "
 
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const packages = {
-  server: {files: ["server.js", "server", "backends", "shared"], extra: [["src/backends/claude-code/tool-catalog.mjs", "backends/claude-code/tool-catalog.mjs"]], bins: ["server.js"]},
+  server: {files: ["server.js", "server", "backends", "shared"], extra: [], bins: ["server.js"]},
   pi: {files: ["frontends/pi", "client", "shared"], extra: [], bins: ["frontends/pi/cli.js"]},
 };
 for (const [name, spec] of Object.entries(packages)) {

@@ -9,7 +9,7 @@
 | `src/frontends/pi/` | Pi 插件（`extension.ts`）和 `a-tether-pi` 启动器（`cli.ts`，含 `login` 子命令）。其他前端可放在同级目录。 |
 | `src/client/` | A 端共用的 HTTP 请求与服务认证。 |
 | `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期。C 端入口 `src/server.ts` 负责令牌的生成与 `token` 子命令。 |
-| `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换与只读工具目录。 |
+| `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换，以及常驻会话（`live.ts`，设计见 [live-session.md](live-session.md)）。 |
 | `src/shared/` | 两端共用的 v0.1 协议、事件编码、错误码，以及配置文件 `~/.a-tether/settings.json` 的读写（`settings.ts`）。 |
 | `packages/` | 两个 npm 包的清单和说明：`server` 发布为 `@a-tether/server`（C 端，命令 `a-tether-server`），`pi` 发布为 `@a-tether/pi`（A 端，命令 `a-tether-pi`）。`dist/` 由构建生成。 |
 | `scripts/build.mjs` | 用 `tsconfig.build.json` 把 `src` 编译成 JS，并组装两个包。 |

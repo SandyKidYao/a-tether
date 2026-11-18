@@ -23,10 +23,9 @@ function settingsToken(env:NodeJS.ProcessEnv) {
   } catch { return undefined; }
 }
 
-type ProcessOptions = {signal?: AbortSignal; cwd?: string; env?: NodeJS.ProcessEnv; input?: string; onLine(line:string):void};
-export async function invoke(args:string[], options:ProcessOptions) {
-  const {signal} = options;
-  signal?.throwIfAborted();
+// Starts the configured CLI in its own process group with an isolated environment.
+// `closed` settles once the process and its pipes are gone; `stop` kills the group.
+export function spawnClaude(args:string[], options:{cwd?: string; env?: NodeJS.ProcessEnv}) {
   const env = {...process.env, ...options.env};
   const command = loadSettings().server.claude;
   delete env.ANTHROPIC_API_KEY;
@@ -59,17 +58,26 @@ export async function invoke(args:string[], options:ProcessOptions) {
       try { process.kill(-child.pid,"SIGKILL"); } catch { child.kill(); }
     }
   };
-  // A CLI launcher can exit while an MCP descendant still owns its pipes.
+  // A CLI launcher can exit while a descendant still owns its pipes.
   if (process.platform !== "win32") child.once("exit",stop);
-  signal?.addEventListener("abort",stop,{once:true});
-  const lines = createInterface({input:child.stdout,crlfDelay:Infinity});
   child.stdin.on("error",()=>{}); // A short-lived CLI can exit before consuming stdin.
+  const lines = createInterface({input:child.stdout,crlfDelay:Infinity});
+  return {child, closed, stop, lines, stderr:()=>stderr.trim()};
+}
+
+type ProcessOptions = {signal?: AbortSignal; cwd?: string; env?: NodeJS.ProcessEnv; input?: string; onLine(line:string):void};
+// One-shot invocation: write the whole input, read every line, wait for exit.
+export async function invoke(args:string[], options:ProcessOptions) {
+  const {signal} = options;
+  signal?.throwIfAborted();
+  const {child, closed, stop, lines, stderr} = spawnClaude(args,options);
+  signal?.addEventListener("abort",stop,{once:true});
   try {
     child.stdin.end(options.input);
     const output = (async () => { for await (const line of lines) options.onLine(line); })();
     const [code] = await Promise.all([closed,output]);
     signal?.throwIfAborted();
-    return {code, stderr:stderr.trim()};
+    return {code, stderr:stderr()};
   } finally {
     stop();
     await closed.catch(()=>{});

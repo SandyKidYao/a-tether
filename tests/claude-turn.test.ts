@@ -3,39 +3,26 @@ import assert from "node:assert/strict";
 import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {spawnSync} from "node:child_process";
 import {normalizeContext} from "@earendil-works/pi-ai";
 import {streamClaudeCode} from "../src/backends/claude-code/claude-turn.ts";
 import {api, defaultUrl, providerId} from "../src/shared/protocol.ts";
 import {useHome, writeSettings} from "./helpers.ts";
-
-test("the MCP catalog can list a bash schema but cannot run it", async t=>{
-  const dir=await mkdtemp(join(tmpdir(),"tether-schema-"));
-  t.after(()=>rm(dir,{recursive:true,force:true}));
-  const file=join(dir,"tools.json");
-  const schema={name:"bash",description:"A-local bash",inputSchema:{type:"object"}};
-  await writeFile(file,JSON.stringify([schema]));
-  const input=[
-    {id:1,method:"tools/list"},
-    {id:2,method:"tools/call",params:{name:"bash",arguments:{command:"pwd"}}},
-  ].map(v=>JSON.stringify({jsonrpc:"2.0",...v})).join("\n")+"\n";
-  const child=spawnSync(process.execPath,["src/backends/claude-code/tool-catalog.mjs",file],{input,encoding:"utf8"});
-  assert.equal(child.status,0);
-  const [listed,denied]=child.stdout.trim().split("\n").map(line=>JSON.parse(line));
-  assert.deepEqual(listed.result.tools,[schema]);
-  assert.equal(denied.error.code,-32601);
-});
 
 test("final-only CLI output preserves text, original tool names and selected route",async t=>{
   const dir=await mkdtemp(join(tmpdir(),"tether-final-"));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const command=join(dir,"cli.mjs");
   await writeFile(command,`#!/usr/bin/env node
-import {readFileSync} from "node:fs";
+import {createInterface} from "node:readline";
 const arg = name => process.argv[process.argv.indexOf(name)+1];
 if(arg("--model")!=="test[1m]") process.exit(2);
-const config=JSON.parse(arg("--mcp-config"));
-const tools=JSON.parse(readFileSync(config.mcpServers.tether.args[1],"utf8"));
+if(JSON.parse(arg("--mcp-config")).mcpServers.tether.type!=="sdk") process.exit(4);
+console.log(JSON.stringify({type:"control_request",request_id:"list",request:{subtype:"mcp_message",server_name:"tether",message:{jsonrpc:"2.0",id:1,method:"tools/list"}}}));
+let tools;
+for await(const line of createInterface({input:process.stdin})) {
+  const frame=JSON.parse(line);
+  if(frame.type==="control_response"&&frame.response.request_id==="list") { tools=frame.response.response.mcp_response.result.tools; break; }
+}
 if(tools[0].name===tools[1].name) process.exit(3);
 for(const item of [
   {type:"assistant", message:{id:"response",content:[
@@ -91,8 +78,10 @@ test("history uses MCP tool names, and bare or unknown tool calls reach Pi inste
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const command=join(dir,"cli.mjs");
   await writeFile(command,`#!/usr/bin/env node
-import {readFileSync} from "node:fs";
-const history=JSON.parse(readFileSync(0,"utf8")).message.content.map(b=>b.text ? JSON.parse(b.text) : b);
+import {createInterface} from "node:readline";
+let first;
+for await(const line of createInterface({input:process.stdin})) { first=line; break; }
+const history=JSON.parse(first).message.content.map(b=>b.text ? JSON.parse(b.text) : b);
 const names=history.flatMap(r=>[r.name,...(Array.isArray(r.content) ? r.content.map(c=>c.name) : [])]).filter(Boolean);
 if(names.join()!=="mcp__tether__bash,mcp__tether__bash") process.exit(4);
 for(const item of [

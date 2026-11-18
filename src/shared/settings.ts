@@ -11,7 +11,7 @@ export const settingsPath = () => join(homedir(), ".a-tether", "settings.json");
 
 export type Settings = {
   token?: string;
-  server: {host: string; port: number; claude: string; allowUsageCredits: boolean};
+  server: {host: string; port: number; claude: string; allowUsageCredits: boolean; maxSessions: number};
   client: {url: string; pi?: string};
 };
 
@@ -65,6 +65,8 @@ export function loadSettings(file = settingsPath()): Settings {
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) fail("server.port", "必须是 1–65535 的整数");
   const allowUsageCredits = server.allowUsageCredits ?? false;
   if (typeof allowUsageCredits !== "boolean") fail("server.allowUsageCredits", "必须是 true 或 false");
+  const maxSessions = server.maxSessions ?? 16;
+  if (typeof maxSessions !== "number" || !Number.isInteger(maxSessions) || maxSessions < 0 || maxSessions > 256) fail("server.maxSessions", "必须是 0–256 的整数");
   // Without client.url, Pi on the same machine follows server.port.
   const url = text(client, "client.url") ?? "http://127.0.0.1:" + port;
   let origin = "";
@@ -77,7 +79,8 @@ export function loadSettings(file = settingsPath()): Settings {
   return {
     token: raw.token as string | undefined,
     server: {host: text(server, "server.host") ?? "127.0.0.1", port: port as number,
-      claude: text(server, "server.claude") ?? "claude", allowUsageCredits: allowUsageCredits as boolean},
+      claude: text(server, "server.claude") ?? "claude", allowUsageCredits: allowUsageCredits as boolean,
+      maxSessions: maxSessions as number},
     client: {url: origin, pi: text(client, "client.pi")},
   };
 }

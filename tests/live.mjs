@@ -42,6 +42,27 @@ async function run(tools, prompt) {
   assert.equal(final?.stopReason,"stop",final?.errorMessage);
   return {results,streamed,text:final.content.filter(b=>b.type==="text").map(b=>b.text).join("")};
 }
+// C reports how many Claude processes it started and how many requests an existing
+// one served, which shows whether a conversation kept its process.
+const config = JSON.parse(settings);
+const url = config.client?.url ?? "http://127.0.0.1:" + (config.server?.port ?? 7310);
+const headers = {authorization:"Bearer " + config.token};
+async function sessions() {
+  const health = await (await fetch(url+"/v1/health",{headers})).json();
+  assert(health.sessions, "C runs a server older than 0.2.0");
+  return health.sessions;
+}
+// One request straight to C, without Pi; returns the final assistant message.
+async function ask(messages) {
+  const id = crypto.randomUUID();
+  const res = await fetch(url+"/v1/requests",{method:"POST",headers,body:JSON.stringify({id,model:"default",context:{messages}})});
+  for (const line of (await res.text()).split("\n").filter(Boolean)) {
+    const frame = JSON.parse(line);
+    if (frame.type === "error") throw new Error("C error: " + frame.code);
+    if (frame.type === "done") return frame.event.message;
+  }
+  throw new Error("No final message");
+}
 try {
   const text = await run(null,"Reply with just these words: Tether stream ready.");
   assert(text.streamed.includes("Tether stream ready"));
@@ -49,6 +70,7 @@ try {
   const marker = randomBytes(12).toString("hex");
   const expected = "VERIFIED-" + marker;
   await writeFile(join(project,"marker.txt"),marker+"\n");
+  const before = await sessions();
   const turn = await run("read,edit,bash",
     "Use the named tools exactly once each, sequentially. Use read on marker.txt. Use edit to prefix its exact random line with VERIFIED-. Use bash to run pwd and cat marker.txt. Reply with only the resulting line.");
   assert.deepEqual(turn.results.map(e=>e.toolName),["read","edit","bash"]);
@@ -59,6 +81,18 @@ try {
   assert(bash.includes(project) && bash.includes(expected));
   assert(turn.text.includes(expected));
   console.log("PASS A read -> edit -> bash; cwd, edited file and final Claude answer match");
+  const after = await sessions();
+  assert.equal(after.started - before.started, 1, "one Claude process for the whole tool loop");
+  assert(after.reused - before.reused >= 3, "each tool result went back to the waiting process");
+  console.log("PASS C served the tool loop from one Claude process");
+  const first = [{role:"user",content:"Remember the word lantern. Reply with just: noted.",timestamp:Date.now()}];
+  const reply = await ask(first);
+  const start = await sessions();
+  const second = await ask([...first,reply,{role:"user",content:"Which word did I ask you to remember? Reply with just the word.",timestamp:Date.now()}]);
+  const end = await sessions();
+  assert.deepEqual([end.started - start.started, end.reused - start.reused], [0, 1]);
+  assert.match(second.content.filter(b=>b.type==="text").map(b=>b.text).join(""), /lantern/i);
+  console.log("PASS a second user message continued the same Claude process");
 } finally {
   await rm(dir,{recursive:true,force:true});
 }

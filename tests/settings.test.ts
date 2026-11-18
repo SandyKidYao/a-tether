@@ -54,12 +54,12 @@ async function runServer(dir: string, args: string[] = [], env: Record<string, s
 test("settings fall back to defaults and client.url follows server.port", async t => {
   const dir = await home(t);
   assert.deepEqual(loadSettings(file(dir)), {token: undefined,
-    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false},
+    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false, maxSessions: 16},
     client: {url: "http://127.0.0.1:7310", pi: undefined}});
-  await writeSettings(dir, {token, server: {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, future: 1},
+  await writeSettings(dir, {token, server: {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4, future: 1},
     client: {pi: "/x/pi"}, unknown: true});
   const s = loadSettings(file(dir));
-  assert.deepEqual(s.server, {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true});
+  assert.deepEqual(s.server, {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4});
   assert.deepEqual(s.client, {url: "http://127.0.0.1:7400", pi: "/x/pi"});
   await writeSettings(dir, {client: {url: "http://192.168.1.20:7310/"}});
   assert.equal(loadSettings(file(dir)).client.url, "http://192.168.1.20:7310", "S11: LAN hosts are allowed");
@@ -74,6 +74,8 @@ test("S4: invalid settings are rejected with the file and field named", async t 
     [{server: {port: 0}}, /server\.port/],
     [{server: {port: "7310"}}, /server\.port/],
     [{server: {allowUsageCredits: "yes"}}, /server\.allowUsageCredits/],
+    [{server: {maxSessions: 1.5}}, /server\.maxSessions/],
+    [{server: {maxSessions: -1}}, /server\.maxSessions/],
     [{server: {claude: ""}}, /server\.claude/],
     [{server: []}, /server 必须是对象/],
     [{client: {url: "https://127.0.0.1:7310"}}, /client\.url/],

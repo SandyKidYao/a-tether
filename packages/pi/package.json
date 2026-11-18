@@ -1,6 +1,6 @@
 {
   "name": "@a-tether/pi",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Pi extension and launcher that uses a remote Claude Code through an A-tether SSH tunnel.",
   "type": "module",
   "license": "MIT",

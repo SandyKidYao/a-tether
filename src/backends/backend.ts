@@ -10,4 +10,8 @@ export interface Backend {
   models(signal: AbortSignal): Promise<BackendModel[]>;
   stream(model: BackendModel, context: TranscriptContext, options: SimpleStreamOptions): AssistantMessageEventStream;
   errorCode(detail: string): Code;
+  // Process counts reported by /v1/health; they carry no conversation data.
+  stats?(): {processes: number; started: number; reused: number};
+  // Releases processes kept between requests; called once when the server stops.
+  close?(): Promise<void>;
 }

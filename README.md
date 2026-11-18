@@ -1,8 +1,8 @@
 # A-tether
 
-在电脑 A 上用 [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 开发 A 的本地项目，模型借用电脑 C 上已登录的 Claude Code。Pi 在 A 管理会话、执行工具；C 每轮启动一个 Claude 进程，结束后清理。A 和 C 也可以是同一台电脑。
+在电脑 A 上用 [Pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 开发 A 的本地项目，模型借用电脑 C 上已登录的 Claude Code。Pi 在 A 管理会话、执行工具；C 为每个 Pi 会话保留一个 Claude 进程，让模型看到原生的多轮对话和工具调用，会话空闲 60 分钟后回收。A 和 C 也可以是同一台电脑。
 
-**数据边界**　Pi 放入上下文的代码、工具定义、工具结果和对话会发送到 C，再进入模型服务。Claude 登录凭据只由 C 上的官方 CLI 使用。C 端服务只打印启动状态和监听端口（第一次启动时另外打印一次新生成的令牌）；请求失败时在终端输出一行诊断（时间、请求 ID 前 8 位、错误码、Claude Code 报错末尾），不记录对话内容、工具参数或令牌。
+**数据边界**　Pi 放入上下文的代码、工具定义、工具结果和对话会发送到 C，再进入模型服务。C 不把对话写入磁盘：内容只保存在 Claude 进程的内存里，会话空闲 60 分钟、进程数超过上限或服务退出时随进程释放。Claude 登录凭据只由 C 上的官方 CLI 使用。C 端服务只打印启动状态和监听端口（第一次启动时另外打印一次新生成的令牌）；请求失败时在终端输出一行诊断（时间、请求 ID 前 8 位、错误码、Claude Code 报错末尾），不记录对话内容、工具参数或令牌。
 
 ## 准备
 
@@ -78,7 +78,7 @@ pi
 ```json
 {
   "token": "由服务生成，或由 login 写入",
-  "server": { "host": "127.0.0.1", "port": 7310, "claude": "/usr/local/bin/claude", "allowUsageCredits": false },
+  "server": { "host": "127.0.0.1", "port": 7310, "claude": "/usr/local/bin/claude", "allowUsageCredits": false, "maxSessions": 16 },
   "client": { "url": "http://127.0.0.1:7310", "pi": "/usr/local/bin/pi" }
 }
 ```
@@ -90,10 +90,11 @@ pi
 | `server.port` | C | 服务监听的端口。 | `7310` |
 | `server.claude` | C | Claude Code CLI 的路径，服务进程的 PATH 里找不到 `claude` 时填写绝对路径。 | `claude` |
 | `server.allowUsageCredits` | C | Claude 账户开始使用超额计费额度时是否继续。为 `false` 时中止请求，避免产生额外费用。 | `false` |
+| `server.maxSessions` | C | 同时保留的 Claude 进程数（0–256），每个约占 50 MB 内存。满了以后回收最久没用的会话，下次用到它时从完整历史重建。设为 `0` 时每次请求都用一次性进程。 | `16` |
 | `client.url` | A | Pi 连接的地址，形如 `http://127.0.0.1:7310`。 | `http://127.0.0.1:` 加 `server.port` |
 | `client.pi` | A | `npx -y @a-tether/pi` 使用的 Pi 路径，Pi 不在 PATH 里时填写绝对路径。 | 在 PATH 中查找 |
 
-- `token`、`server.host`、`server.port` 改后需要重启服务；`server.claude`、`server.allowUsageCredits` 在服务下一次调用 Claude 时生效。
+- `token`、`server.host`、`server.port` 改后需要重启服务；`server.claude`、`server.allowUsageCredits`、`server.maxSessions` 在服务下一次处理请求时生效。
 - A 端的 `token`、`client.url` 在 Pi 的下一次请求时生效，不用重启 Pi；`client.pi` 在下次运行 `npx -y @a-tether/pi` 时生效。
 - 文件写错（不是合法 JSON、字段类型不对）时，服务拒绝启动，Pi 报错，都会指出出错的字段。文件不会被自动覆盖。
 - **监听局域网地址**：把 `server.host` 设成 `0.0.0.0` 或局域网 IP 后，A 可以不经端口转发，用 `client.url` 直接连接 C。但令牌会以明文 HTTP 在局域网里传输，同一网络中的设备都能尝试连接，服务启动时也会提醒这一点。只在可信网络里这样用。
@@ -120,7 +121,8 @@ pi
 
 ## 已知限制
 
-- 单次模型请求最长五分钟。每轮都会重新启动 Claude 进程，工具调用多的任务会有额外的启动开销。
+- 单次模型请求最长五分钟（只计生成时间，不含 Pi 执行工具和等待输入的时间）。
+- Claude 进程只能接着 Pi 的历史往下走。Pi 压缩上下文、切换分支、编辑或重试消息、换模型或推理强度、修改系统提示，以及按 Esc 取消之后，C 会用完整历史重新启动一个进程，这一轮会慢一些。
 - 0.1.1 已在两台电脑之间按本文步骤完成端到端验证（初始化、login、真实对话）。SSH 隧道断线时的处理在同一台 Mac 上用独立进程验证过。Windows 不在支持范围内。
 - 停止服务请用 Ctrl+C 或 SIGTERM，服务会清理正在运行的 Claude 进程和临时文件。
 

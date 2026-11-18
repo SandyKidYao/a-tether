@@ -87,7 +87,7 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     const signal = controller.signal;
     if (req.method === "GET" && req.url === "/v1/health") {
       const {available, loggedIn, diagnostic} = await backend.status(signal);
-      return json(res, 200, {available, loggedIn, diagnostic});
+      return json(res, 200, {available, loggedIn, diagnostic, ...(backend.stats ? {sessions: backend.stats()} : {})});
     }
     if (req.method === "GET" && req.url === "/v1/models") return json(res, 200, (await models(signal)).map(({route, ...model}) => model));
     const cancelId = req.url?.slice("/v1/requests/".length) ?? "";
@@ -177,6 +177,7 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     if (!startup.signal.aborted) throw error;
   } finally {
     await Promise.allSettled(pending);
+    await backend.close?.();
     process.chdir(tmpdir());
     await rm(directory, {recursive: true, force: true});
   }
