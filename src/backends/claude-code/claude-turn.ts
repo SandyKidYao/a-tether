@@ -3,6 +3,7 @@ import {calculateCost, createAssistantMessageEventStream, getCurrentSystemPrompt
 import {LiveClaude, admit, reuse, type End, type Input, type Segment} from "./live.ts";
 import {messageKey, normalizeMessages, transcript} from "./transcript.ts";
 import {loadSettings} from "../../shared/settings.ts";
+import type {Lease} from "../backend.ts";
 
 // Claude Code adds an Environment section about C (its temporary directory, OS, date)
 // even with a replaced system prompt; without this note the model mistakes it for A.
@@ -11,7 +12,8 @@ const instructions = "You are the assistant in a Pi conversation. Pi runs on com
   "The Environment section of this prompt describes the machine that hosts this model process, not computer A. " +
   "For paths, the working directory and the platform, follow Pi's instructions, such as its <cwd>.";
 
-export function streamClaudeCode(model:Model<string>, context:TranscriptContext, options:SimpleStreamOptions, route = model.id) {
+export function streamClaudeCode(model:Model<string>, context:TranscriptContext, options:SimpleStreamOptions, route = model.id,
+    onLease?:(lease:Lease)=>void) {
   const stream = createAssistantMessageEventStream();
   const message:AssistantMessage = {role:"assistant",api:model.api,provider:model.provider,model:model.id,
     timestamp:Date.now(),content:[],stopReason:"pending",
@@ -38,7 +40,7 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
     const names = new Map([...tools.flatMap((tool,i)=>[[tool.name,tool.name],[catalog[i].name,tool.name]] as const),...known]);
     const conversation = normalizeMessages(context.messages);
     const keys = conversation.map(messageKey);
-    const spec = {command:claude, route, system:getCurrentSystemPrompt(context.messages)+"\n\n"+instructions,
+    const spec = {command:claude, route, model:model.id, system:getCurrentSystemPrompt(context.messages)+"\n\n"+instructions,
       effort:options.reasoning ? (options.reasoning==="minimal" ? "low" : options.reasoning) : undefined,
       maxTokens:options.maxTokens, tools:catalog};
     options.signal?.throwIfAborted();
@@ -47,11 +49,22 @@ export function streamClaudeCode(model:Model<string>, context:TranscriptContext,
       try { await lease.live.setTools(catalog); }
       catch { lease.live.kill(); lease = undefined; }
     }
-    const live = lease?.live ?? await LiveClaude.start(spec,admit());
+    const history = lease?.live.consumed.length ?? conversation.length;
+    const pooled = lease ? true : admit();
+    const live = lease?.live ?? await LiveClaude.start(spec,pooled);
     const input:Input = lease?.input ?? {kind:"user",content:transcript(conversation,name=>claudeNames.get(name) ?? name)};
+    onLease?.({pid:live.pid, history,
+      how:lease ? "reused" : !pooled ? "oneshot" : conversation.length > 1 ? "rebuilt" : "started",
+      ...(lease ? {added:input.kind === "results" ? {results:input.results.size} : {messages:conversation.length-history}} : {})});
+    live.holding = keys.length;
     stream.push({type:"start",partial:message});
     try { await live.run(input,translate(),options.signal); }
-    catch (error) { live.kill(error); throw error; }
+    catch (error) {
+      const reason = options.signal?.aborted ? options.signal.reason : undefined;
+      live.kill(error, reason === "lost" ? "lost" : reason === "cancelled" ? "cancelled" : "failed");
+      throw error;
+    }
+    live.pendingNames = message.content.flatMap(b=>b.type==="toolCall" ? [b.name] : []);
     live.release([...keys,messageKey(message)]);
 
     // One request's share of the CLI output: a single model call, which ends at its

@@ -8,19 +8,13 @@ import { join } from "node:path";
 import type { Backend, BackendModel } from "../backends/backend.ts";
 import { generationOptions, header, protocol, uuid, wireEvent, type Code } from "../shared/protocol.ts";
 import { isLoopback, loadSettings, validToken } from "../shared/settings.ts";
+import { Monitor, clip, type ActiveRequest } from "./monitor.ts";
 
 function json(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, {"content-type": "application/json", "cache-control": "no-store"}).end(JSON.stringify(data));
 }
 export class Failure extends Error {
   constructor(readonly status: number, readonly code: Code, readonly detail = "") { super(code); }
-}
-// C logs one line per failure: time, request ID prefix, code and a clipped
-// diagnostic from Claude Code. Conversation content and tool data are never logged.
-export function clip(text: string) { return text.replace(/\s+/g, " ").trim().slice(0, 500); }
-function logError(id: string, code: string, detail = "") {
-  const text = clip(detail);
-  console.error(`${new Date().toISOString()} ${id ? id.slice(0, 8) : "--------"} ${code}${text ? ": " + text : ""}`);
 }
 // Aborts carry a reason: A cancelled or went away ("cancelled"), or stopped beating ("lost").
 function asFailure(error: unknown, reason: unknown) {
@@ -65,25 +59,35 @@ async function readRequest(req: IncomingMessage) {
   catch { throw new Failure(400, "invalid"); }
 }
 
-export async function runServer(backend: Backend, {token, host, port}: {token: string; host: string; port: number}) {
+// console starts C's TUI once the server listens. It gets the monitor and a way to stop
+// the server, and returns its own stop, called once the server has shut down.
+export type Console = (monitor: Monitor, stop: () => void) => (summary: {processes: number}) => void;
+
+export async function runServer(backend: Backend, {token, host, port, console: ui}: {token: string; host: string; port: number; console?: Console}) {
   if (!validToken(token)) throw new Error("A-tether token must be at least 32 characters without whitespace");
   const digest = (value: string) => createHash("sha256").update(value).digest();
   const expected = digest("Bearer " + token);
 
   const directory = await mkdtemp(join(tmpdir(), "a-tether-"));
   process.chdir(directory);
+  const monitor = new Monitor(backend);
+  const logError = (id: string, code: string, detail = "") => monitor.diagnostic(id, code, detail);
+  const status = async (signal?: AbortSignal) => monitor.status(await backend.status(signal));
   // Each streaming request, with the time A's last heartbeat for it arrived.
-  const active = new Map<string, {controller: AbortController; heard: number}>();
+  const active = monitor.active;
   const pending = new Set<Promise<void>>();
   const controllers = new Set<AbortController>();
 
   const models = catalogCache<BackendModel>(async signal => {
-    const health = await backend.status(signal);
+    const health = await status(signal);
     if (!health.available) throw new Failure(503, "unavailable", health.detail);
     if (health.diagnostic) throw new Failure(502, "backend", "status check failed: " + (health.detail ?? "unknown"));
     if (!health.loggedIn) throw new Failure(503, "login");
-    try { return await backend.models(signal); }
-    catch (error) {
+    try {
+      const catalog = await backend.models(signal);
+      monitor.catalogLoaded(catalog.length);
+      return catalog;
+    } catch (error) {
       signal.throwIfAborted();
       throw new Failure(502, "discovery", describe(error));
     }
@@ -93,9 +97,10 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     if (!timingSafeEqual(digest(req.headers.authorization ?? ""), expected)) throw new Failure(401, "unauthorized");
     const version = req.headers[header.protocol];
     if (version !== protocol) throw new Failure(400, "version", "A speaks protocol " + (version ?? "(none)") + ", C speaks " + protocol);
+    const client = monitor.seen(req);
     const signal = controller.signal;
     if (req.method === "GET" && req.url === "/v1/health") {
-      const {available, loggedIn, diagnostic} = await backend.status(signal);
+      const {available, loggedIn, diagnostic} = await status(signal);
       return json(res, 200, {available, loggedIn, diagnostic, ...(backend.stats ? {sessions: backend.stats()} : {})});
     }
     if (req.method === "GET" && req.url === "/v1/models") return json(res, 200, (await models(signal)).map(({route, ...model}) => model));
@@ -121,40 +126,47 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     if (active.has(id)) throw new Failure(409, "duplicate");
     const {heartbeatInterval, heartbeatTimeout} = loadSettings().server;
     const interval = heartbeatInterval * 1000, timeout = heartbeatTimeout * 1000;
-    const entry = {controller, heard: Date.now()};
-    active.set(id, entry);
+    const options = generationOptions(body.options);
+    const started = Date.now();
+    const entry: ActiveRequest = {id, controller, heard: started, client, model: typeof body.model === "string" ? body.model.slice(0, 64) : "?",
+      effort: options.reasoning, started, output: started, chars: 0};
+    monitor.started(entry);
     // From here on every outcome, failures included, is a frame on the stream. There
     // is no limit on the request's length: heartbeats tell a slow model from a dead peer.
     res.writeHead(200, {"content-type": "application/x-ndjson", "cache-control": "no-store",
       [header.interval]: String(interval), [header.timeout]: String(timeout)});
     res.flushHeaders();
     const send = (frame: object) => res.destroyed || res.write(JSON.stringify({id, ...frame}) + "\n");
-    const started = Date.now();
-    let output = started, seq = 0, ended = false;
+    let seq = 0, ended = false, failed = "";
+    let done: {tools: string[]; stopReason: string} | undefined;
     const detail = (code: string) => code === "lost" ? `no heartbeat from A for ${Math.round((Date.now() - entry.heard) / 1000)}s` : "";
     const beat = setInterval(() => {
       const now = Date.now();
       if (now - entry.heard > timeout) return controller.abort("lost");
-      send({type: "heartbeat", seq: ++seq, elapsed: now - started, modelIdle: now - output, clientIdle: now - entry.heard});
+      send({type: "heartbeat", seq: ++seq, elapsed: now - started, modelIdle: now - entry.output, clientIdle: now - entry.heard});
     }, interval);
     try {
       const model = (await models(signal)).find(m => m.id === body.model);
       signal.throwIfAborted();
       if (!model) throw new Failure(400, "invalid", "unknown model");
-      const stream = backend.stream(model, normalizeContext({messages: body.context.messages}), {
-        ...generationOptions(body.options), signal,
-      });
+      const stream = backend.stream(model, normalizeContext({messages: body.context.messages}), {...options, signal},
+        {lease: lease => monitor.leased(entry, lease)});
       try {
         for await (const event of stream) {
-          output = Date.now();
+          entry.output = Date.now();
           if (event.type === "error") {
             const code = signal.aborted ? signal.reason : backend.errorCode(event.error.errorMessage ?? "");
             logError(id, code, signal.aborted ? detail(code) : event.error.errorMessage);
             ended = true;
+            failed = code;
             send({type: "error", code});
             continue;
           }
-          ended ||= event.type === "done";
+          if ("delta" in event) entry.chars += event.delta.length;
+          if (event.type === "done") {
+            ended = true;
+            done = {stopReason: event.reason, tools: event.message.content.flatMap(b => b.type === "toolCall" ? [b.name] : [])};
+          }
           if (!send({type: event.type === "done" ? "done" : "event", event: wireEvent(event)}) && !signal.aborted) await once(res, "drain", {signal});
         }
       } finally {
@@ -164,8 +176,12 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     } catch (error) {
       const failure = asFailure(error, signal.reason);
       logError(id, failure.code, failure.detail || detail(failure.code));
+      failed ||= failure.code;
       if (!ended) send({type: "error", code: failure.code});
-    } finally { clearInterval(beat); active.delete(id); }
+    } finally {
+      clearInterval(beat);
+      if (active.get(id) === entry) monitor.finished(entry, done ?? {failed: failed || "cancelled"});
+    }
     res.end();
   }
 
@@ -185,7 +201,10 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
     void task.finally(() => { pending.delete(task); controllers.delete(controller); });
   });
   const startup = new AbortController();
+  let stopConsole: ReturnType<Console> | undefined;
+  let ending: number | undefined;
   const shutdown = () => {
+    ending ??= backend.processes?.().length ?? 0;
     startup.abort("cancelled");
     for (const controller of controllers) controller.abort("cancelled");
     server.close();
@@ -194,22 +213,26 @@ export async function runServer(backend: Backend, {token, host, port}: {token: s
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   try {
-    const health = await backend.status(startup.signal);
+    const health = await status(startup.signal);
     startup.signal.throwIfAborted();
     const state = !health.available ? "missing"
       : health.diagnostic ? "status check failed" + (health.detail ? " (" + clip(health.detail) + ")" : "")
       : health.loggedIn ? "logged in" : "not logged in";
-    console.log(backend.name + ":", state);
+    monitor.print(backend.name + ": " + state, health.loggedIn ? "ok" : "error");
     server.listen(port, host);
     await once(server, "listening", {signal:startup.signal});
-    console.log("A-tether listening on " + (host.includes(":") ? `[${host}]` : host) + ":" + port);
-    if (!isLoopback(host)) console.log("注意：服务监听在非本机地址，令牌以明文 HTTP 传输，同一网络中的设备都能连接。");
+    monitor.print("A-tether listening on " + (host.includes(":") ? `[${host}]` : host) + ":" + port, "ok");
+    if (!isLoopback(host)) monitor.print("注意：服务监听在非本机地址，令牌以明文 HTTP 传输，同一网络中的设备都能连接。", "warn");
+    stopConsole = ui?.(monitor, shutdown);
     await once(server, "close");
   } catch (error) {
     if (!startup.signal.aborted) throw error;
   } finally {
+    const processes = ending ?? backend.processes?.().length ?? 0;
     await Promise.allSettled(pending);
     await backend.close?.();
+    monitor.close();
+    stopConsole?.({processes});
     process.chdir(tmpdir());
     await rm(directory, {recursive: true, force: true});
   }

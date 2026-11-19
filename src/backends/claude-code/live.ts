@@ -9,11 +9,13 @@ import type {ToolResultMessage, UserMessage} from "@earendil-works/pi-ai";
 import {isolated, spawnClaude, streaming} from "./claude-process.ts";
 import {mcpResult, userContent, type normalizeMessages} from "./transcript.ts";
 import {loadSettings} from "../../shared/settings.ts";
+import type {ExitReason, ProcessExit, ProcessInfo} from "../backend.ts";
 
 type Conversation = ReturnType<typeof normalizeMessages>;
 export type CatalogTool = {name: string; description: string; inputSchema: unknown};
 // Everything fixed when the process starts. Tools may change later; the rest may not.
-export type Spec = {command: string; route: string; system: string; effort?: string; maxTokens?: number; tools: CatalogTool[]};
+// model is the public ID, shown on C's console only.
+export type Spec = {command: string; route: string; model?: string; system: string; effort?: string; maxTokens?: number; tools: CatalogTool[]};
 export type Input = {kind: "user"; content: unknown[]} | {kind: "results"; results: Map<string, unknown>};
 // Where a request leaves the process: waiting for Pi's tool results, about to emit its
 // final `result`, or done with the turn.
@@ -32,6 +34,9 @@ const server = "tether";
 const toolListTimeout = 5000;
 let idleMs = 60 * 60_000; // Claude Code's prompt cache lives one hour
 const pool = new Set<LiveClaude>();
+// Every process alive, pooled or one-shot, for C's console.
+const running = new Set<LiveClaude>();
+const watchers = new Set<(exit: ProcessExit) => void>();
 // Counts for /v1/health: processes started and requests served by an existing one.
 export const liveStats = {started: 0, reused: 0};
 
@@ -40,7 +45,14 @@ export class LiveClaude {
   consumed: string[] = [];
   pending: string[] = [];
   busy = true;
-  lastUsed = Date.now();
+  readonly started = Date.now();
+  lastUsed = this.started;
+  reuses = 0;
+  // History the process holds for C's console, counted while a request is still running.
+  holding = 0;
+  // Names of the tool calls in `pending`, set by the request that ended with them.
+  pendingNames: string[] = [];
+  private reclaimAt?: number;
   private diverged = false;
   private reason: unknown;
   private failing = false;
@@ -64,6 +76,7 @@ export class LiveClaude {
         ...(spec.maxTokens ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(spec.maxTokens)} : {})};
       const live = new LiveClaude(spec, pooled, spawnClaude(args, {cwd: dir, env}), dir);
       liveStats.started++;
+      running.add(live);
       if (pooled) pool.add(live);
       void live.read();
       return live;
@@ -80,10 +93,12 @@ export class LiveClaude {
     signal?.throwIfAborted();
     if (this.state === "dead") throw this.reason;
     clearTimeout(this.timer);
+    this.reclaimAt = undefined;
     this.state = "generating";
     this.pending = [];
+    this.pendingNames = [];
     const done = new Promise<void>((resolve, reject) => { this.active = {segment, resolve, reject}; });
-    const abort = () => this.kill(signal?.reason);
+    const abort = () => this.kill(signal?.reason, signal?.reason === "lost" ? "lost" : "cancelled");
     signal?.addEventListener("abort", abort, {once: true});
     if (input.kind === "user") this.send({type: "user", message: {role: "user", content: input.content}});
     else for (const [id, result] of input.results) {
@@ -110,18 +125,23 @@ export class LiveClaude {
     this.consumed = consumed;
     this.busy = false;
     this.lastUsed = Date.now();
-    if (!this.pooled || this.diverged) return this.kill();
-    this.timer = setTimeout(() => this.kill(), idleMs).unref();
+    if (!this.pooled || this.diverged) return this.kill(undefined, this.pooled ? "diverged" : "oneshot");
+    this.reclaimAt = this.lastUsed + idleMs;
+    this.timer = setTimeout(() => this.kill(undefined, "idle"), idleMs).unref();
   }
 
-  kill(reason?: unknown) {
+  // why tells C's console what ended the process; reason is what a waiting request rejects with.
+  kill(reason?: unknown, why: ExitReason = "failed") {
     if (this.state !== "dead") {
+      const history = this.busy ? this.holding : this.consumed.length;
       this.state = "dead";
+      running.delete(this);
       this.reason = reason ?? new Error(["Claude process ended", this.proc.stderr()].filter(Boolean).join("; "));
       clearTimeout(this.timer);
       pool.delete(this);
       this.proc.stop();
       void this.proc.closed.catch(() => {}).finally(() => rm(this.dir, {recursive: true, force: true}));
+      for (const watcher of watchers) watcher({pid: this.pid, model: this.spec.model ?? this.spec.route, why, history});
     }
     const active = this.active;
     this.active = undefined;
@@ -129,6 +149,13 @@ export class LiveClaude {
   }
 
   get closed() { return this.proc.closed.catch(() => -1); }
+
+  info(): ProcessInfo {
+    return {pid: this.pid, state: this.state === "dead" ? "idle" : this.state, busy: this.busy, pooled: this.pooled,
+      model: this.spec.model ?? this.spec.route, effort: this.spec.effort, history: this.busy ? this.holding : this.consumed.length,
+      pending: this.state === "awaitingTools" ? this.pendingNames : [], reuses: this.reuses,
+      started: this.started, lastUsed: this.lastUsed, reclaimAt: this.busy ? undefined : this.reclaimAt};
+  }
 
   private send(message: unknown) { this.proc.child.stdin.write(JSON.stringify(message) + "\n"); }
   private reply(requestId: string, response: unknown) {
@@ -150,7 +177,7 @@ export class LiveClaude {
       this.kill(error);
       return;
     }
-    this.kill();
+    this.kill(undefined, "exited");
   }
 
   private handle(event: any) {
@@ -167,7 +194,7 @@ export class LiveClaude {
       if (event.type === "result" && this.state === "finishing") {
         if (event.subtype === "success" && !event.is_error) this.state = "idle"; else this.kill();
       } else if (["stream_event", "assistant", "result"].includes(event.type)) {
-        this.kill(); // output nobody asked for: the CLI went on without Pi
+        this.kill(undefined, "diverged"); // output nobody asked for: the CLI went on without Pi
       }
       return;
     }
@@ -244,6 +271,7 @@ export function reuse(spec: Spec, keys: string[], conversation: Conversation) {
     }
     if (!input) continue;
     live.busy = true;
+    live.reuses++;
     liveStats.reused++;
     return {live, input, toolsChanged: JSON.stringify(live.spec.tools) !== JSON.stringify(spec.tools)};
   }
@@ -256,17 +284,28 @@ export function admit() {
   while (pool.size >= max) {
     const victim = [...pool].filter(p => !p.busy).sort((a, b) => a.lastUsed - b.lastUsed)[0];
     if (!victim) return false;
-    victim.kill();
+    victim.kill(undefined, "evicted");
   }
   return max > 0;
 }
 
 export async function shutdownLive() {
   const all = [...pool];
-  for (const live of all) live.kill();
+  for (const live of all) live.kill(undefined, "shutdown");
   await Promise.all(all.map(live => live.closed));
 }
 
 // Tests shorten the idle timeout instead of waiting an hour.
 export function setIdleTimeout(ms: number) { idleMs = ms; }
 export const livePool = () => [...pool];
+export const liveProcesses = () => [...running];
+export function watchLive(listener: (exit: ProcessExit) => void) {
+  watchers.add(listener);
+  return () => { watchers.delete(listener); };
+}
+// Ends a process from C's console. A request it serves fails as a backend error.
+export function killLive(pid: number) {
+  const live = [...running].find(p => p.pid === pid);
+  live?.kill(new Error("Claude process ended from the C console"), "killed");
+  return !!live;
+}

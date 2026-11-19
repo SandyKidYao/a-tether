@@ -6,14 +6,22 @@ export const defaultUrl = "http://127.0.0.1:7310";
 export const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Both ends send this header on every request and response and refuse any other
 // value, so A and C must be upgraded together. Bump it on any wire change.
-export const protocol = "2";
+export const protocol = "3";
 export const header = {
   protocol: "a-tether-protocol",
+  // Sent by A on every request so C's console can tell one Pi from another: a random
+  // ID per Pi process and A's host name. Neither identifies the user's account.
+  client: "a-tether-client",
+  host: "a-tether-host",
   // Sent by C with each stream, in milliseconds: how often both ends beat, and how long
   // either end waits without hearing from the other before it gives the request up.
   interval: "a-tether-heartbeat-interval",
   timeout: "a-tether-heartbeat-timeout",
 };
+export const clientId = /^[a-f0-9]{12}$/;
+// Printable ASCII only, as it travels in a header.
+export const hostLabel = (name: string) => name.replace(/[^\x21-\x7e]/g, "").replace(/\.local$/i, "").slice(0, 64);
+
 // What C knows when it beats: the request's age, how long the model has been silent
 // and how long ago A's last heartbeat arrived. A quotes the last one when C goes quiet.
 export type Heartbeat = {seq: number; elapsed: number; modelIdle: number; clientIdle: number};
