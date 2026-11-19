@@ -56,7 +56,7 @@ async function sessions() {
 // One request straight to C, without Pi; returns the final assistant message.
 async function ask(messages) {
   const id = crypto.randomUUID();
-  const res = await fetch(url+"/v1/requests",{method:"POST",headers,body:JSON.stringify({id,model:"default",context:{messages}})});
+  const res = await fetch(url+"/v1/turns/"+id,{method:"POST",headers,body:JSON.stringify({model:"default",context:{add:messages}})});
   for (const line of (await res.text()).split("\n").filter(Boolean)) {
     const frame = JSON.parse(line);
     if (frame.type === "error") throw new Error("C error: " + frame.code);

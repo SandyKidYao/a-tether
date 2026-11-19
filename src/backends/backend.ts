@@ -28,7 +28,7 @@ export type ProcessInfo = {
 // one for a new conversation, a new one fed the whole history, or one outside the pool.
 export type Lease = {pid?: number; how: "reused" | "started" | "rebuilt" | "oneshot"; history: number;
   added?: {results: number} | {messages: number}};
-export type ExitReason = "idle" | "evicted" | "oneshot" | "diverged" | "cancelled" | "lost" | "failed" | "exited" | "killed" | "shutdown";
+export type ExitReason = "idle" | "evicted" | "oneshot" | "diverged" | "cancelled" | "lost" | "left" | "failed" | "exited" | "killed" | "shutdown";
 export type ProcessExit = {pid?: number; model: string; why: ExitReason; history: number};
 
 export interface Backend {
@@ -46,6 +46,9 @@ export interface Backend {
   processes?(): ProcessInfo[];
   watch?(listener: (exit: ProcessExit) => void): () => void;
   kill?(pid: number): boolean;
+  // The A these processes served has quit: reclaim them after graceMs unless a request
+  // picks them up again, and evict them first when the pool is full.
+  retire?(pids: number[], graceMs: number): void;
   // Releases processes kept between requests; called once when the server stops.
   close?(): Promise<void>;
 }

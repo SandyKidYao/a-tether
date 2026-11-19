@@ -23,7 +23,7 @@ async function until(predicate: () => boolean) {
   assert.fail("Timed out waiting for condition");
 }
 
-test("authenticated provider cancellation and disconnect reap C workers", {timeout:30000}, async t => {
+test("cancelling, deleting and quitting reap C workers, a broken connection does not", {timeout:30000}, async t => {
   const dir = await mkdtemp(join(tmpdir(), "tether-test-"));
   const worker = join(dir, "worker");
   const socket = createServer().listen(0, "127.0.0.1");
@@ -60,12 +60,12 @@ test("authenticated provider cancellation and disconnect reap C workers", {timeo
   const models = await (await fetch(url+"/v1/models",{headers})).json();
   const context = normalizeContext({messages:[{role:"user",content:marker,timestamp:Date.now()}]});
   let workingDir = "";
-  for (const mode of ["cancel", "disconnect", "delete"]) {
+  for (const mode of ["cancel", "bye", "delete"]) {
     const controller = new AbortController();
     const id = randomUUID();
     const stream = mode === "cancel" ? remoteStream(models[0],context,{signal:controller.signal}) : undefined;
-    const response = stream ? undefined : await fetch(url+"/v1/requests",{
-      method:"POST", headers, body:JSON.stringify({id,model:"default",context}), signal:controller.signal,
+    const response = stream ? undefined : await fetch(url+"/v1/turns/"+id,{
+      method:"POST", headers, body:JSON.stringify({model:"default",context:{add:context.messages}}), signal:controller.signal,
     });
     await until(() => existsSync(worker));
     const info = JSON.parse(await readFile(worker,"utf8"));
@@ -74,8 +74,16 @@ test("authenticated provider cancellation and disconnect reap C workers", {timeo
     assert.equal(info.serviceToken,false);
     assert.notEqual(info.cwd,process.cwd());
     if (mode === "delete") {
-      assert.equal((await fetch(url+"/v1/requests/"+id,{method:"DELETE",headers})).status,200);
+      assert.equal((await fetch(url+"/v1/turns/"+id,{method:"DELETE",headers})).status,200);
       assert.match(await response!.text(),/"code":"cancelled"/);
+    } else if (mode === "bye") {
+      // The connection breaks: the turn and its Claude process go on.
+      controller.abort();
+      await delay(500);
+      assert.doesNotThrow(() => process.kill(info.pid,0));
+      assert.equal(existsSync(info.temp),true);
+      // Pi quits: its turns are cancelled at once.
+      assert.equal((await fetch(url+"/v1/bye",{method:"POST",headers,body:"{}"})).status,200);
     } else {
       controller.abort();
       if (stream) {

@@ -10,12 +10,26 @@ export type Tag = "request" | "process" | "client" | "system" | "error";
 export type Level = "info" | "ok" | "warn" | "error";
 export type Entry = {at: number; tag: Tag; level: Level; text: string};
 
-export type Client = {key: string; id?: string; host: string; addr: string; firstSeen: number; lastSeen: number; today: number};
+// pinged is A's last ping, rtt the round trip A measured for the one before, and left
+// the time A said goodbye.
+export type Client = {key: string; id?: string; host: string; addr: string; firstSeen: number; lastSeen: number; today: number;
+  pinged?: number; rtt?: number; left?: number};
+// What C shows for an A: it said goodbye, it has a request running, its pings arrive,
+// or they stopped. An A that never pinged, such as a script calling the API, counts by
+// its last request.
+export type Presence = "left" | "busy" | "idle" | "lost";
+export function presence(client: Client, busy: boolean, now: number, intervalMs: number): Presence {
+  if (client.left !== undefined) return "left";
+  if (now - (client.pinged ?? client.lastSeen) > 3 * intervalMs + 2000) return "lost";
+  return busy ? "busy" : "idle";
+}
 
-// One streaming request. The HTTP layer owns the controller and the heartbeat time;
-// the rest is for the console.
+// One turn while it generates. The HTTP layer owns the controller and `heard`, the last
+// time A pinged for the turn or attached to it; the rest is for the console.
 export type ActiveRequest = {
   id: string; controller: AbortController; heard: number;
+  // Whether a connection of A's is reading the turn, and since when none is.
+  attached?: boolean; detached?: number;
   client?: string; model: string; effort?: string; started: number;
   // Last model output, and the characters of text, thinking and tool input streamed so far.
   output: number; chars: number;
@@ -37,6 +51,7 @@ const exits: Record<ProcessExit["why"], string> = {
   diverged: "历史和 Pi 对不上，不再复用",
   cancelled: "请求取消，进程随之结束",
   lost: "A 失联，进程随之结束",
+  left: "A 已退出，保留期过后回收",
   failed: "请求失败，不再复用",
   exited: "进程自己退出了",
   killed: "已在控制台手动结束",
@@ -53,6 +68,9 @@ export class Monitor {
   readonly owners = new Map<number, string | undefined>();
   health?: Health & {at: number};
   catalog?: {count: number; at: number};
+  // Bytes C holds for A: the histories behind incremental requests and the frames of
+  // turns A has not released. Set by the HTTP layer.
+  memory?: () => {contexts: number; turns: number};
   // Set by the TUI: it takes over the terminal, so nothing is printed directly.
   quiet = false;
   onChange?: () => void;
@@ -134,6 +152,28 @@ export class Monitor {
     client.addr = addr;
     this.onChange?.();
     return client.key;
+  }
+
+  pinged(key: string, rtt?: number) {
+    const client = this.clients.get(key);
+    if (!client) return;
+    client.pinged = this.now();
+    // An A that pings again has not left: Pi reloaded its extensions. Only a ping says
+    // so: the last requests of a Pi that is quitting may arrive after its goodbye.
+    client.left = undefined;
+    if (typeof rtt === "number" && rtt >= 0 && rtt < 3_600_000) client.rtt = Math.round(rtt);
+    this.onChange?.();
+  }
+  // A said goodbye: its idle processes go after the grace period, and first when the
+  // pool needs room.
+  bye(key: string, graceMs: number) {
+    const client = this.clients.get(key);
+    if (!client) return;
+    client.left = this.now();
+    const pids = [...this.owners].filter(([, owner]) => owner === key).map(([pid]) => pid);
+    if (pids.length) this.backend.retire?.(pids, graceMs);
+    this.note("client", "info", `${client.host}${client.id ? " #" + client.id.slice(0, 4) : ""} 已退出` +
+      (pids.length ? ` · ${pids.length} 个进程${graceMs ? " " + Math.round(graceMs / 1000) + " 秒后回收" : "立即回收"}` : ""));
   }
 
   started(request: ActiveRequest) {

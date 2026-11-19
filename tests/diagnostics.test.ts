@@ -91,9 +91,9 @@ for await (const line of createInterface({input:process.stdin})) {
   for (let i = 0; i < 200 && !logs.includes("listening"); i++) await delay(30);
   const marker = "secret-content-" + randomUUID();
   const id = randomUUID();
-  const res = await fetch(`http://127.0.0.1:${port}/v1/requests`, {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/turns/${id}`, {
     method: "POST", headers: {authorization: "Bearer " + token, [header.protocol]: protocol},
-    body: JSON.stringify({id, model: "default", context: normalizeContext({messages: [{role: "user", content: marker, timestamp: 0}]})}),
+    body: JSON.stringify({model: "default", context: {add: normalizeContext({messages: [{role: "user", content: marker, timestamp: 0}]}).messages}}),
   });
   assert.match(await res.text(), /"code":"overloaded"/);
   for (let i = 0; i < 100 && !logs.includes(id.slice(0, 8)); i++) await delay(30);

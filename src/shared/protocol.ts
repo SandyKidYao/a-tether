@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
 
 export const providerId = "a-tether";
@@ -6,15 +7,17 @@ export const defaultUrl = "http://127.0.0.1:7310";
 export const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // Both ends send this header on every request and response and refuse any other
 // value, so A and C must be upgraded together. Bump it on any wire change.
-export const protocol = "3";
+export const protocol = "4";
 export const header = {
   protocol: "a-tether-protocol",
+  // The package version of the sender, quoted when the protocols differ.
+  version: "a-tether-version",
   // Sent by A on every request so C's console can tell one Pi from another: a random
   // ID per Pi process and A's host name. Neither identifies the user's account.
   client: "a-tether-client",
   host: "a-tether-host",
-  // Sent by C with each stream, in milliseconds: how often both ends beat, and how long
-  // either end waits without hearing from the other before it gives the request up.
+  // Sent by C with each stream and each ping reply, in milliseconds: how often A pings
+  // and C beats, and how long C keeps a turn whose A it no longer hears from.
   interval: "a-tether-heartbeat-interval",
   timeout: "a-tether-heartbeat-timeout",
 };
@@ -22,9 +25,24 @@ export const clientId = /^[a-f0-9]{12}$/;
 // Printable ASCII only, as it travels in a header.
 export const hostLabel = (name: string) => name.replace(/[^\x21-\x7e]/g, "").replace(/\.local$/i, "").slice(0, 64);
 
-// What C knows when it beats: the request's age, how long the model has been silent
-// and how long ago A's last heartbeat arrived. A quotes the last one when C goes quiet.
-export type Heartbeat = {seq: number; elapsed: number; modelIdle: number; clientIdle: number};
+// What C knows when it beats: the last frame of the turn, the turn's age, how long the
+// model has been silent and how long ago C last heard from A. A quotes the last one
+// when it gives the turn up.
+export type Heartbeat = {n: number; elapsed: number; modelIdle: number; clientIdle: number};
+
+// A turn's context travels as a base C already holds plus what was added since. Messages
+// are named by the digest of their JSON, and a history by the chain of its digests, so
+// neither end needs a session ID. C answers `resync` when it lacks the base or a reply
+// named by `$ref`, and A sends everything.
+export type WireContext = {base?: {count: number; chain: string}; add: unknown[]};
+export const digest = (text: string) => createHash("sha256").update(text).digest("base64url");
+export const chainOf = (previous: string, item: string) => digest(previous + ":" + item);
+export const isRef = (item: unknown): item is {$ref: string} =>
+  typeof item === "object" && item !== null && typeof (item as {$ref?: unknown}).$ref === "string";
+// What A sends with each ping: the frames it has of its turns, the turns it no longer
+// wants, and the round trip of its previous ping.
+export type Ping = {turns?: Record<string, number>; released?: string[]; rtt?: number};
+export type Pong = {loggedIn: boolean; turns: Record<string, {n: number; state: "running" | "done" | "gone"}>};
 // Messages for transport failures carry an English phrase that Pi's auto-retry
 // recognizes (see isRetryableAssistantError in pi-ai), so Pi retries them with backoff.
 export const messages = {
@@ -43,20 +61,32 @@ export const messages = {
   duplicate: "请求 ID 已在使用。",
   large: "请求超过 32 MiB 上限。",
   version: "A 和 C 的 A-tether 版本不一致，请把两端升级到同一版本（A 上运行 npx -y @a-tether/pi --version，C 上运行 npx -y @a-tether/server --version 查看）。",
-  lost: "C 超过心跳时限没有收到 A 的心跳，已结束这次请求（connection lost）。请检查网络和端口转发。",
+  lost: "C 超过时限没有收到 A 的任何消息，已结束这次请求（connection lost）。请检查网络和端口转发。",
+  gone: "C 上已经没有这次请求：C 重启过，或 A 失联太久被 C 放弃（connection lost）。",
+  stalled: "向 C 上传请求时长时间没有进展（connection lost）。请检查网络和端口转发。",
+  // Never shown: A answers it by sending the whole context.
+  resync: "C 缺少这次请求引用的历史，A 会改发完整上下文。",
   connection: "无法连接 C 的 A-tether 服务，请检查网络、端口转发（如 SSH 隧道）和 C 端服务（connection error）。",
   interrupted: "与 C 的连接在响应中途断开，请检查网络、端口转发和 C 端服务（connection lost）。",
   malformed: "C 返回了无法识别的数据，请确认两端的 A-tether 版本一致。",
 };
 export type Code = keyof typeof messages;
 
+// A reply without the protocol header did not come from A-tether: a proxy, a tunnel,
+// or Node answering a broken request by itself. That is a transport failure, not a
+// version mismatch, and Pi retries it.
+export const foreignReply = (status: number) =>
+  `收到的不是 A-tether 服务的响应（HTTP ${status}），可能来自端口转发、代理或超时的连接（connection error）。请检查 client.url 和网络。`;
+export const versionMismatch = (mine: string, theirs: string | undefined, theirProtocol: string) =>
+  `A 和 C 的 A-tether 版本不一致：A 是 ${mine}（协议 ${protocol}），C 是 ${theirs ?? "更早的版本"}（协议 ${theirProtocol}）。请把两端升级到同一版本。`;
+
 const seconds = (ms: number) => Math.round(ms / 1000);
-// A has heard nothing from C, not even a heartbeat, for longer than the timeout.
+// A has heard nothing from C for longer than the timeout, across every reconnection.
 export function heartbeatLost(silentMs: number, last?: Heartbeat) {
   const seen = last
     ? `最后一次心跳时，请求已运行 ${seconds(last.elapsed)} 秒，模型 ${seconds(last.modelIdle)} 秒没有输出，C ${seconds(last.clientIdle)} 秒前收到过 A 的心跳。`
     : "这次请求还没有收到过心跳。";
-  return `A-tether 已 ${seconds(silentMs)} 秒没有收到 C 的任何数据，连接可能已经中断（connection lost）。${seen}请检查网络、端口转发和 C 端服务。`;
+  return `A-tether 已 ${seconds(silentMs)} 秒没有收到 C 的任何数据，重连也没有成功（connection lost）。${seen}请检查网络、端口转发和 C 端服务。`;
 }
 
 // Runtime whitelist on BOTH ends. In particular, never forward env, headers,

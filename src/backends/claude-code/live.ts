@@ -52,6 +52,8 @@ export class LiveClaude {
   holding = 0;
   // Names of the tool calls in `pending`, set by the request that ended with them.
   pendingNames: string[] = [];
+  // Its A has quit: reclaimed early, and evicted before any other process.
+  retired = false;
   private reclaimAt?: number;
   private diverged = false;
   private reason: unknown;
@@ -94,6 +96,7 @@ export class LiveClaude {
     if (this.state === "dead") throw this.reason;
     clearTimeout(this.timer);
     this.reclaimAt = undefined;
+    this.retired = false;
     this.state = "generating";
     this.pending = [];
     this.pendingNames = [];
@@ -128,6 +131,18 @@ export class LiveClaude {
     if (!this.pooled || this.diverged) return this.kill(undefined, this.pooled ? "diverged" : "oneshot");
     this.reclaimAt = this.lastUsed + idleMs;
     this.timer = setTimeout(() => this.kill(undefined, "idle"), idleMs).unref();
+  }
+
+  // Its A has quit. A busy process belongs to a request that is being cancelled.
+  retire(graceMs: number) {
+    if (this.busy || this.state === "dead") return;
+    if (graceMs <= 0) return this.kill(undefined, "left");
+    this.retired = true;
+    const at = Date.now() + graceMs;
+    if (this.reclaimAt !== undefined && this.reclaimAt <= at) return;
+    clearTimeout(this.timer);
+    this.reclaimAt = at;
+    this.timer = setTimeout(() => this.kill(undefined, "left"), graceMs).unref();
   }
 
   // why tells C's console what ended the process; reason is what a waiting request rejects with.
@@ -277,12 +292,12 @@ export function reuse(spec: Spec, keys: string[], conversation: Conversation) {
   }
 }
 
-// Whether a new process may join the pool, evicting the least recently used idle one
-// when full. With every slot busy the request runs in a process of its own.
+// Whether a new process may join the pool, evicting an idle one when full: first those
+// whose A has quit, then the least recently used. With every slot busy the request runs in a process of its own.
 export function admit() {
   const max = loadSettings().server.maxSessions;
   while (pool.size >= max) {
-    const victim = [...pool].filter(p => !p.busy).sort((a, b) => a.lastUsed - b.lastUsed)[0];
+    const victim = [...pool].filter(p => !p.busy).sort((a, b) => Number(b.retired) - Number(a.retired) || a.lastUsed - b.lastUsed)[0];
     if (!victim) return false;
     victim.kill(undefined, "evicted");
   }
@@ -302,6 +317,9 @@ export const liveProcesses = () => [...running];
 export function watchLive(listener: (exit: ProcessExit) => void) {
   watchers.add(listener);
   return () => { watchers.delete(listener); };
+}
+export function retireLive(pids: number[], graceMs: number) {
+  for (const live of [...pool]) if (live.pid !== undefined && pids.includes(live.pid)) live.retire(graceMs);
 }
 // Ends a process from C's console. A request it serves fails as a backend error.
 export function killLive(pid: number) {

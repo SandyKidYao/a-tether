@@ -9,7 +9,7 @@ import { protocol } from "../shared/protocol.ts";
 import { isLoopback, loadSettings, loginCommand, type Settings } from "../shared/settings.ts";
 import { version } from "../shared/version.ts";
 import type { Console } from "./http.ts";
-import { short, type ActiveRequest, type Client, type Entry, type Monitor } from "./monitor.ts";
+import { presence, short, type ActiveRequest, type Client, type Entry, type Monitor, type Presence } from "./monitor.ts";
 import { fit, safe, slice, truncate, width } from "./text.ts";
 
 // ---------- styles ----------
@@ -40,6 +40,8 @@ export type View = {
   server: Pick<Settings["server"], "maxSessions" | "heartbeatInterval" | "heartbeatTimeout">;
   clients: Client[]; processes: Proc[]; requests: ActiveRequest[]; entries: Entry[];
   totals: {requests: number; failed: number; started: number; reused: number};
+  // Bytes C holds for A: histories for incremental requests, and frames of turns.
+  held?: {contexts: number; turns: number};
   hostOf(key?: string): string;
 };
 
@@ -58,7 +60,7 @@ export function snapshot(monitor: Monitor, options: {host: string; port: number;
     .sort((a, b) => b.lastSeen - a.lastSeen);
   return {now, host: options.host, port: options.port, token: options.token, boot: monitor.boot,
     health: monitor.health, catalog: monitor.catalog, server: options.server, clients, processes, requests,
-    entries: monitor.entries, totals: {...monitor.totals, started: stats.started, reused: stats.reused},
+    entries: monitor.entries, totals: {...monitor.totals, started: stats.started, reused: stats.reused}, held: monitor.memory?.(),
     hostOf: key => monitor.hostOf(key)};
 }
 
@@ -189,43 +191,54 @@ function status(v: View, narrow: boolean) {
     label("今天请求") + `${v.totals.requests} · 进行中 ${green(v.requests.length)} · 失败 ${v.totals.failed ? red(v.totals.failed) : dim(0)}`,
     label("进程复用") + `${rate} ${dim(`（启动 ${started} · 复用 ${reused}）`)}`,
     label("模型目录") + (v.catalog ? `${v.catalog.count} 个 ${dim("· " + duration(v.now - v.catalog.at) + " 前刷新")}` : dim("还没有加载")),
-    label("心跳") + `每 ${v.server.heartbeatInterval}s ${dim("· 时限 " + v.server.heartbeatTimeout + "s")}`,
-    label("内存") + (memory ? `Claude 进程合计 ${Math.round(memory / 1024)} MB` : dim("—")),
+    label("心跳") + `每 ${v.server.heartbeatInterval}s ping ${dim("· 失联 " + v.server.heartbeatTimeout + "s 放弃")}`,
+    // 缓存: the histories and unfetched turns C holds for A, in the server's own memory.
+    label("内存") + (memory ? `进程 ${Math.round(memory / 1024)} MB` : dim("进程 —")) +
+      (v.held ? dim(` · 缓存 ${megabytes(v.held.contexts + v.held.turns)}`) : ""),
   ];
 }
 
+const megabytes = (bytes: number) => bytes < 1024 * 1024 ? Math.round(bytes / 1024) + " KB" : (bytes / 1024 / 1024).toFixed(1) + " MB";
 function lateHeartbeat(v: View, r: ActiveRequest) { return v.now - r.heard > v.server.heartbeatInterval * 1500; }
+const presenceText: Record<Presence, string> = {busy: green("● 请求中"), idle: cyan("○ 空闲"), lost: yellow("! 失联"), left: dim("× 已退出")};
+function presenceOf(v: View, c: Client) {
+  return presence(c, v.requests.some(r => r.client === c.key), v.now, v.server.heartbeatInterval * 1000);
+}
 
 function clientsPanel(v: View, ui: Ui, w: number, h: number, focus: boolean) {
-  const online = v.clients.filter(c => v.now - c.lastSeen < 5 * 60_000).length;
+  const online = v.clients.filter(c => ["busy", "idle"].includes(presenceOf(v, c))).length;
   const title = `A 端 ${dim("· " + online + " 在线")}`;
   if (!v.clients.length) return box(title, "", [dim("还没有 A 端连接过。按 t 查看 A 端的 login 命令。")], w, h, focus);
   const sel = choose(ui, "clients", v.clients, c => c.key);
   const cells = v.clients.map(c => {
     const active = v.requests.filter(r => r.client === c.key);
     const quiet = v.now - c.lastSeen;
-    const late = active.some(r => lateHeartbeat(v, r));
+    const state = presenceOf(v, c);
+    const heardAt = c.left ?? c.pinged ?? c.lastSeen;
     return {
       name: c.host + (c.id ? dim(" #" + c.id.slice(0, 4)) : ""),
       addr: dim(c.addr),
-      state: active.length ? green("● 请求中") : quiet < 5 * 60_000 ? cyan("○ 在线") : dim("· 离开"),
+      state: presenceText[state] + (state === "lost" && active.length ? yellow(" · 有请求") : ""),
+      rtt: c.rtt === undefined || state === "left" ? dim("—") : c.rtt > 1000 ? yellow(c.rtt + " ms") : c.rtt + " ms",
       active: active.length ? String(active.length) : dim("0"),
       procs: String(v.processes.filter(p => p.owner === c.key).length),
       today: String(c.today),
-      seen: late ? yellow(duration(quiet) + " 前 · 心跳晚了") : quiet > 5 * 60_000 ? dim(duration(quiet) + " 前") : duration(quiet) + " 前",
+      seen: state === "left" ? dim(duration(v.now - heardAt) + " 前退出") : state === "lost" ? yellow(duration(v.now - heardAt) + " 前")
+        : duration(quiet) + " 前",
     };
   });
   const rows = table([
     {title: "A 端", cells: cells.map(c => c.name), drop: 0, flex: true},
     {title: "来源地址", cells: cells.map(c => c.addr), drop: 6},
     {title: "状态", cells: cells.map(c => c.state), drop: 1},
+    {title: "延迟", cells: cells.map(c => c.rtt), right: true, drop: 4},
     {title: "进行中", cells: cells.map(c => c.active), right: true, drop: 2},
     {title: "进程", cells: cells.map(c => c.procs), right: true, drop: 4},
     {title: "今天", cells: cells.map(c => c.today), right: true, drop: 5},
     {title: "最近活动", cells: cells.map(c => c.seen), drop: 3},
   ], w - 4);
   const win = windowed(rows.slice(1), sel, h - 3);
-  return box(title, dim("5 分钟内有请求算在线"), [rows[0], ...win.rows], w, h, focus, win.sel + 1, win.more);
+  return box(title, dim("Pi 开着就 ping，3 次没到算失联"), [rows[0], ...win.rows], w, h, focus, win.sel + 1, win.more);
 }
 
 function processesPanel(v: View, ui: Ui, w: number, h: number, focus: boolean) {
@@ -266,17 +279,24 @@ function processesPanel(v: View, ui: Ui, w: number, h: number, focus: boolean) {
   return box(title, right, [rows[0], ...win.rows], w, h, focus, win.sel + 1, win.more);
 }
 
+// Whether A is reading the turn, and how long until C gives up an A it cannot hear.
+function linkText(v: View, r: ActiveRequest, heard: number, timeout: number) {
+  const left = `${Math.max(0, Math.ceil((timeout - heard) / 1000))}s 后放弃`;
+  if (heard > timeout * 0.6) return red(`失联 ${duration(heard)} · ${left}`);
+  if (r.attached === false) return yellow(`已断开 ${duration(v.now - (r.detached ?? v.now))} · 等待重连`);
+  return lateHeartbeat(v, r) ? yellow("ping 晚了 · " + duration(heard) + " 前") : "已连接 · " + duration(heard) + " 前";
+}
+
 function requestsPanel(v: View, ui: Ui, w: number, h: number, focus: boolean) {
   const title = `进行中的请求 ${dim("· " + v.requests.length)}`;
-  const right = dim(`模型长时间不输出不算异常，A 的心跳超过 ${v.server.heartbeatTimeout}s 才算失联`);
+  const right = dim(`连接断开不结束请求，A 重连后接着收；A 失联超过 ${v.server.heartbeatTimeout}s 才放弃`);
   if (!v.requests.length) return box(title, right, [dim("没有进行中的请求。")], w, h, focus);
   const sel = choose(ui, "requests", v.requests, r => r.id);
   const timeout = v.server.heartbeatTimeout * 1000;
   const cells = v.requests.map(r => {
     const heard = v.now - r.heard;
     const silent = v.now - r.output;
-    const beat = heard > timeout * 0.6 ? red(`${duration(heard)} 前 · ${Math.max(0, Math.ceil((timeout - heard) / 1000))}s 后判定失联`)
-      : lateHeartbeat(v, r) ? yellow(duration(heard) + " 前") : duration(heard) + " 前";
+    const beat = linkText(v, r, heard, timeout);
     return {
       id: short(r.id), owner: v.hostOf(r.client), model: modelName(r.model) + (r.effort ? " " + dim(r.effort) : ""),
       pid: r.lease?.pid === undefined ? dim("—") : String(r.lease.pid), how: r.lease ? leaseText[r.lease.how] : dim("准备中"),
@@ -292,7 +312,7 @@ function requestsPanel(v: View, ui: Ui, w: number, h: number, focus: boolean) {
     {title: "来源", cells: cells.map(c => c.how), drop: 5},
     {title: "已运行", cells: cells.map(c => c.age), right: true, drop: 0},
     {title: "模型静默", cells: cells.map(c => c.silent), right: true, drop: 6},
-    {title: "A 心跳", cells: cells.map(c => c.beat), right: true, drop: 1},
+    {title: "A 的连接", cells: cells.map(c => c.beat), right: true, drop: 1},
     {title: "输出", cells: cells.map(c => c.chars), right: true, drop: 7},
   ], w - 4);
   const win = windowed(rows.slice(1), sel, h - 3);
@@ -350,6 +370,7 @@ function dialog(v: View, ui: Ui, modal: Modal, cols: number): {title: string; li
       kv("Enter", "查看选中项的详情"),
       kv("x", "结束选中的 Claude 进程（要确认）"),
       kv("c", "取消选中的请求（要确认），A 会收到「请求已取消」"),
+      kv("A 的状态", "请求中、空闲（Pi 开着）、失联（ping 没到）、已退出（Pi 正常退出）"),
       kv("f / 空格", "筛选最近动作 / 暂停滚动"),
       kv("t", "显示 A 端的 login 命令，令牌默认打码"),
       kv("q / Ctrl+C", "停止服务，有请求在进行时先确认；弹窗里 q 只关闭弹窗"),
@@ -392,7 +413,7 @@ function dialog(v: View, ui: Ui, modal: Modal, cols: number): {title: string; li
         kv("进程", r.lease ? `${r.lease.pid ?? "?"} ${dim("·")} ${leaseText[r.lease.how]}` : dim("准备中")),
         kv("已运行", duration(v.now - r.started)),
         kv("模型静默", duration(v.now - r.output)),
-        kv("A 心跳", duration(v.now - r.heard) + " 前" + dim(` · 超过 ${v.server.heartbeatTimeout}s 判定失联`)),
+        kv("A 的连接", linkText(v, r, v.now - r.heard, v.server.heartbeatTimeout * 1000) + dim(` · 失联超过 ${v.server.heartbeatTimeout}s 放弃`)),
         kv("输出", thousands(r.chars) + " 字符"),
         "", hint([["c", "取消请求"], ["Esc", "关闭"]])]};
     }
@@ -403,7 +424,10 @@ function dialog(v: View, ui: Ui, modal: Modal, cols: number): {title: string; li
       return {title: `A 端 ${c.host}`, lines: [
         kv("客户端 ID", c.id ? c.id + dim("（Pi 进程随机生成）") : dim("没有，A 端的 A-tether 较旧或不是 Pi 插件")),
         kv("来源地址", c.addr + (isLoopback(c.addr) ? dim(" · 经端口转发或本机") : "")),
+        kv("状态", presenceText[presenceOf(v, c)] + (c.left ? dim(" · " + duration(v.now - c.left) + " 前") : "")),
+        kv("延迟", c.rtt === undefined ? dim("还没有 ping 过") : c.rtt + " ms" + dim("（A 测得的一次往返）")),
         kv("第一次出现", duration(v.now - c.firstSeen) + " 前"),
+        kv("最近 ping", c.pinged ? duration(v.now - c.pinged) + " 前" : dim("没有，A 不是 Pi 插件")),
         kv("最近活动", duration(v.now - c.lastSeen) + " 前"),
         kv("今天请求", String(c.today)),
         kv("Claude 进程", procs.length ? procs.map(p => p.pid).join(", ") : "—"),

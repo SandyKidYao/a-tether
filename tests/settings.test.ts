@@ -54,15 +54,17 @@ async function runServer(dir: string, args: string[] = [], env: Record<string, s
 test("settings fall back to defaults and client.url follows server.port", async t => {
   const dir = await home(t);
   assert.deepEqual(loadSettings(file(dir)), {token: undefined,
-    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false, maxSessions: 16, heartbeatInterval: 10, heartbeatTimeout: 30},
+    server: {host: "127.0.0.1", port: 7310, claude: "claude", allowUsageCredits: false, maxSessions: 16, heartbeatInterval: 10, heartbeatTimeout: 120, exitGrace: 300},
     client: {url: "http://127.0.0.1:7310", pi: undefined}});
   await writeSettings(dir, {token, server: {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4, future: 1},
     client: {pi: "/x/pi"}, unknown: true});
   const s = loadSettings(file(dir));
   assert.deepEqual(s.server, {host: "0.0.0.0", port: 7400, claude: "/x/claude", allowUsageCredits: true, maxSessions: 4,
-    heartbeatInterval: 10, heartbeatTimeout: 30});
-  await writeSettings(dir, {server: {heartbeatInterval: 20}});
-  assert.equal(loadSettings(file(dir)).server.heartbeatTimeout, 60, "the default timeout follows a longer interval");
+    heartbeatInterval: 10, heartbeatTimeout: 120, exitGrace: 300});
+  await writeSettings(dir, {server: {heartbeatInterval: 50}});
+  assert.equal(loadSettings(file(dir)).server.heartbeatTimeout, 150, "the default timeout follows a longer interval");
+  await writeSettings(dir, {server: {exitGrace: 0}});
+  assert.equal(loadSettings(file(dir)).server.exitGrace, 0, "0 reclaims the processes of an A that quit at once");
   assert.deepEqual(s.client, {url: "http://127.0.0.1:7400", pi: "/x/pi"});
   await writeSettings(dir, {client: {url: "http://192.168.1.20:7310/"}});
   assert.equal(loadSettings(file(dir)).client.url, "http://192.168.1.20:7310", "S11: LAN hosts are allowed");
@@ -84,6 +86,9 @@ test("S4: invalid settings are rejected with the file and field named", async t 
     [{server: {heartbeatInterval: 2.5}}, /server\.heartbeatInterval/],
     [{server: {heartbeatInterval: 10, heartbeatTimeout: 15}}, /server\.heartbeatTimeout/],
     [{server: {heartbeatTimeout: "30"}}, /server\.heartbeatTimeout/],
+    [{server: {exitGrace: -1}}, /server\.exitGrace/],
+    [{server: {exitGrace: 3601}}, /server\.exitGrace/],
+    [{server: {exitGrace: "300"}}, /server\.exitGrace/],
     [{server: []}, /server 必须是对象/],
     [{client: {url: "https://127.0.0.1:7310"}}, /client\.url/],
     [{client: {url: "http://u:p@127.0.0.1:7310"}}, /client\.url/],

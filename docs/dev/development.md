@@ -7,8 +7,8 @@
 | 路径 | 职责 |
 | --- | --- |
 | `src/frontends/pi/` | Pi 插件（`extension.ts`）和 `a-tether-pi` 启动器（`cli.ts`，含 `login` 子命令）。其他前端可放在同级目录。 |
-| `src/client/` | A 端共用的 HTTP 请求与服务认证。 |
-| `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期（`http.ts`）；监控数据（`monitor.ts`：A 端、事件记录、计数，非终端模式下按原格式打印日志）；监控界面（`tui.ts`：纯函数 `render`/`press` 加终端驱动，`text.ts` 处理中文宽度）。C 端入口 `src/server.ts` 负责令牌的生成、`token` 子命令，以及在 stdout、stdin 都是终端且没有 `--plain` 时启用界面。 |
+| `src/client/` | A 端共用的部分：HTTP 请求与服务认证，自己管理保持打开的连接（`http.ts`）；链接状态与 ping 循环，也是 Pi 状态栏的文案来源（`link.ts`）；`/a-tether-status` 的链路体检（`doctor.ts`）。 |
+| `src/server/` | C 端的 HTTP 路由、认证、取消及请求生命周期（`http.ts`）；回合的帧缓冲、续传与保留（`turns.ts`）；增量上下文所依赖的历史（`contexts.ts`）；监控数据（`monitor.ts`：A 端、事件记录、计数，非终端模式下按原格式打印日志）；监控界面（`tui.ts`：纯函数 `render`/`press` 加终端驱动，`text.ts` 处理中文宽度）。C 端入口 `src/server.ts` 负责令牌的生成、`token` 子命令，以及在 stdout、stdin 都是终端且没有 `--plain` 时启用界面。 |
 | `src/backends/claude-code/` | Claude Code 的模型发现、进程调用、流式转换，以及常驻会话（`live.ts`，设计见 [live-session.md](live-session.md)）。 |
 | `src/shared/` | 两端共用的 v0.1 协议、事件编码、错误码，以及配置文件 `~/.a-tether/settings.json` 的读写（`settings.ts`）。 |
 | `packages/` | 两个 npm 包的清单和说明：`server` 发布为 `@a-tether/server`（C 端，命令 `a-tether-server`），`pi` 发布为 `@a-tether/pi`（A 端，命令 `a-tether-pi`）。`dist/` 由构建生成。 |
@@ -37,4 +37,6 @@ npm run test:live  # 真实验收，使用本机的 settings.json、端口转发
 
 真实验收前，本机要先 `login` 过并连通 C。脚本把本机的 settings.json 复制到临时 HOME，在独立的临时 A 项目中运行真实的 Pi：先检查 Pi 收到文本增量，再随机生成一行内容，让模型调用 read 读取、edit 加前缀、bash 执行 pwd 与 cat。脚本核对工具顺序、文件内容、实际工作目录和模型最终回复，完成后删除临时项目。
 
-0.1.0 的开发验收在同一台 Mac 上用独立进程和目录模拟 A、C，使用 OpenSSH 客户端及服务端、真实 Pi 和真实 Claude 账户，三种工具调用及最终回复均通过。断开正在执行请求的 SSH 隧道后，Pi 显示连接中断，对应的 Claude 进程退出。离线测试另覆盖取消、临时文件清理、日志脱敏和配置文件的各种情况，监控界面（`tests/console.test.ts`：真实请求下记录的 A 端、进程与请求，从界面结束进程和取消请求，多种终端尺寸下每行不超宽，界面上不出现对话内容和令牌），以及心跳：模型长时间无输出时请求不中断、C 静默时 A 在时限内放弃并引用最后一次心跳、A 停止心跳时 C 结束 Claude 进程、两端版本不一致时拒绝（`tests/heartbeat.test.ts`）。
+0.1.0 的开发验收在同一台 Mac 上用独立进程和目录模拟 A、C，使用 OpenSSH 客户端及服务端、真实 Pi 和真实 Claude 账户，三种工具调用及最终回复均通过。断开正在执行请求的 SSH 隧道后，Pi 显示连接中断，对应的 Claude 进程退出。离线测试另覆盖取消、临时文件清理、日志脱敏和配置文件的各种情况，监控界面（`tests/console.test.ts`：真实请求下记录的 A 端、进程与请求，从界面结束进程和取消请求，多种终端尺寸下每行不超宽，界面上不出现对话内容和令牌），以及 A 对一个按脚本行事的 C 的反应：模型长时间无输出时请求不中断、连接断开或静默后从断点续传、一直连不上时在时限内放弃并引用最后一次心跳、只上传新增的上下文、收到 `resync` 后改发全量、两端版本不一致或对方不是 A-tether 时的报错（`tests/heartbeat.test.ts`）。
+
+弱网行为用 `tests/resilience.test.ts` 验证：进程内启动完整的 C，A 端用真实的 Pi 流函数，中间经过 `tests/chaos.ts` 的故障代理。代理能切断全部连接、拒绝新连接、扣住字节不转发（模拟丢包）、让连接在传过一定字节后停顿（模拟大包被丢弃）。测试用的假 Claude 认识 `DRIP n`，每 100 毫秒输出一段，便于在回复中途制造故障。新增弱网相关的行为时沿用这套写法。

@@ -2,7 +2,7 @@ import type { Backend } from "../backend.ts";
 import type { Code } from "../../shared/protocol.ts";
 import { discoverClaudeModels, getClaudeStatus } from "./claude-process.ts";
 import { streamClaudeCode } from "./claude-turn.ts";
-import { killLive, livePool, liveProcesses, liveStats, shutdownLive, watchLive } from "./live.ts";
+import { killLive, livePool, liveProcesses, liveStats, retireLive, shutdownLive, watchLive } from "./live.ts";
 
 export function backendCode(detail: string): Code {
   if (/prompt is too long|context.(length|window)|too many tokens|maximum context/i.test(detail)) return "context";
@@ -23,5 +23,6 @@ export const claudeCode: Backend = {
   processes: () => liveProcesses().map(live => live.info()),
   watch: watchLive,
   kill: killLive,
+  retire: retireLive,
   close: shutdownLive,
 };
