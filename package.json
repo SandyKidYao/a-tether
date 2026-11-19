@@ -10,7 +10,7 @@
     "server": "node --experimental-transform-types src/server.ts",
     "check": "tsc --noEmit",
     "test": "node --experimental-transform-types --test tests/*.test.ts",
-    "test:live": "node tests/live.mjs",
+    "test:live": "node --experimental-transform-types tests/live.mjs",
     "build": "node scripts/build.mjs",
     "pack:dry": "npm run build && npm pack --dry-run ./packages/server ./packages/pi"
   },

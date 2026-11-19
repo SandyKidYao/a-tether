@@ -9,6 +9,7 @@ import {join} from "node:path";
 import {createInterface} from "node:readline";
 import {once} from "node:events";
 import {fileURLToPath} from "node:url";
+import {header, protocol} from "../src/shared/protocol.ts";
 
 const settings = await readFile(join(homedir(),".a-tether","settings.json"),"utf8").catch(() => "{}");
 if (!JSON.parse(settings).token) throw new Error("Run `npx -y @a-tether/pi login <token>` on this machine first");
@@ -46,7 +47,7 @@ async function run(tools, prompt) {
 // one served, which shows whether a conversation kept its process.
 const config = JSON.parse(settings);
 const url = config.client?.url ?? "http://127.0.0.1:" + (config.server?.port ?? 7310);
-const headers = {authorization:"Bearer " + config.token};
+const headers = {authorization:"Bearer " + config.token, [header.protocol]:protocol};
 async function sessions() {
   const health = await (await fetch(url+"/v1/health",{headers})).json();
   assert(health.sessions, "C runs a server older than 0.2.0");
