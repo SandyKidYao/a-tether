@@ -33,15 +33,17 @@ async function run(tools, prompt) {
   const results = [];
   let final;
   let streamed = "";
+  // Assistant messages of the run: one request to C each.
+  let requests = 0;
   for await (const line of createInterface({input:child.stdout})) {
     const event = JSON.parse(line);
     if (event.type === "tool_execution_end") results.push(event);
-    if (event.type === "message_end" && event.message.role === "assistant") final = event.message;
+    if (event.type === "message_end" && event.message.role === "assistant") { final = event.message; requests++; }
     if (event.assistantMessageEvent?.type === "text_delta") streamed += event.assistantMessageEvent.delta;
   }
   assert.equal((await done)[0],0,final?.errorMessage);
   assert.equal(final?.stopReason,"stop",final?.errorMessage);
-  return {results,streamed,text:final.content.filter(b=>b.type==="text").map(b=>b.text).join("")};
+  return {results,streamed,requests,text:final.content.filter(b=>b.type==="text").map(b=>b.text).join("")};
 }
 // C reports how many Claude processes it started and how many requests an existing
 // one served, which shows whether a conversation kept its process.
@@ -83,9 +85,11 @@ try {
   assert(turn.text.includes(expected));
   console.log("PASS A read -> edit -> bash; cwd, edited file and final Claude answer match");
   const after = await sessions();
-  assert.equal(after.started - before.started, 1, "one Claude process for the whole tool loop");
-  assert(after.reused - before.reused >= 3, "each tool result went back to the waiting process");
-  console.log("PASS C served the tool loop from one Claude process");
+  const counts = `${turn.requests} requests, started +${after.started - before.started}, reused +${after.reused - before.reused}`;
+  assert.equal(after.started - before.started, 1, "one Claude process for the whole tool loop: " + counts);
+  // Every request after the first carries tool results to the process that waits for them.
+  assert(after.reused - before.reused >= turn.requests - 1 && turn.requests >= 2, "each tool result went back to the waiting process: " + counts);
+  console.log("PASS C served the tool loop from one Claude process (" + counts + ")");
   const first = [{role:"user",content:"Remember the word lantern. Reply with just: noted.",timestamp:Date.now()}];
   const reply = await ask(first);
   const start = await sessions();

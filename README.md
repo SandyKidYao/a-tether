@@ -165,6 +165,7 @@ npx -y @a-tether/pi --version       # A：显示插件版本和本机 Pi 的版�
 | 「收到的不是 A-tether 服务的响应（HTTP nnn）」 | 回答请求的不是 C 的 A-tether 服务，而是端口转发、代理，或别的程序。检查 `client.url` 指向的地址和端口。 |
 | 「版本不一致」 | 两端必须使用同一版本。提示里写了两端各自的版本，把旧的一端升级。 |
 | 状态栏显示「网络不稳」，每轮开始都要等好几秒，或总在重连 | 运行 `/a-tether-status`。出现「链路很可能在丢弃大包」时见下面的「大包被丢弃」。 |
+| 「心跳能到 C，但稍大的请求过不去」 | 链路在丢弃大包，而这台电脑不会自动改用小包。见下面的「大包被丢弃」。这个错误不会自动重试：不改 MTU，重发也过不去。 |
 | `/model` 提示 `Could not refresh a-tether` | 同「无法连接」，用 `/a-tether-status` 查看具体原因。 |
 | C 上找不到 Claude Code 或未登录 | 在运行服务的 C 账户里运行 `claude auth status`。PATH 不同时，在 C 的 settings.json 里设置 `server.claude` 为绝对路径，然后重启服务。 |
 | 后端错误或无模型目录 | 看 C 服务终端里对应请求 ID 的诊断行。检查 C 能访问模型服务、`claude` 能正常运行，以及 C 是否设置了自定义后端地址或非 Claude 登录的认证变量。 |
@@ -184,6 +185,8 @@ ping -c 3 -s 1000 <C 的地址>   # 通
 ping -c 3 -s 1400 <C 的地址>   # 不通
 ```
 
+有的系统发现大包不通后会自己改用小包（macOS 如此，表现为每个新连接先卡几秒）；有的不会（实测 Windows 如此，表现为心跳正常、状态栏显示上传没有回应，随后报「心跳能到 C，但稍大的请求过不去」），这时对话完全无法进行。
+
 处理方法是把虚拟网卡的 MTU 调小到 1280，只在 A 或 C 一端改也有效。下面的命令重启后失效，ZeroTier 刷新配置时也可能把它改回去；要长期生效，需要在 ZeroTier 一侧调小这个网络的 MTU，做法见 ZeroTier 的文档。`<网卡>` 用 `ifconfig` 或 `ip addr` 查看，是带有 C 所在网段地址的那一个。
 
 ```sh
@@ -191,7 +194,14 @@ sudo ifconfig <网卡> mtu 1280         # macOS
 sudo ip link set dev <网卡> mtu 1280  # Linux
 ```
 
-改完再运行 `/a-tether-status`，提示消失就是生效了。能让两台电脑打通直连的话，延迟和丢包也会一起改善。
+Windows 用管理员终端，网卡名取第一条命令输出里 ZeroTier 的那一行：
+
+```bat
+netsh interface ipv4 show subinterfaces
+netsh interface ipv4 set subinterface "<网卡名>" mtu=1280 store=persistent
+```
+
+改完再运行 `/a-tether-status`，提示消失就是生效了。调小之后，上面那条 1400 字节的 ping 在本机就会被拒绝，不能再用它验证。能让两台电脑打通直连的话，延迟和丢包也会一起改善。
 
 ## 已知限制
 

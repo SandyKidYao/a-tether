@@ -64,6 +64,8 @@ export const messages = {
   lost: "C 超过时限没有收到 A 的任何消息，已结束这次请求（connection lost）。请检查网络和端口转发。",
   gone: "C 上已经没有这次请求：C 重启过，或 A 失联太久被 C 放弃（connection lost）。",
   stalled: "向 C 上传请求时长时间没有进展（connection lost）。请检查网络和端口转发。",
+  // Not worded for Pi's retry: the link will drop the next attempt the same way.
+  blocked: "心跳能到 C，但稍大的请求过不去：这次上传一直没有回应，4 KB 的测试请求也没有回应。链路在丢弃大包（虚拟网卡的 MTU 比实际链路能通过的大），重发没有用。把 ZeroTier 这类虚拟网卡的 MTU 调到 1280，A 或 C 改一端即可，做法见 README「大包被丢弃」。",
   // Never shown: A answers it by sending the whole context.
   resync: "C 缺少这次请求引用的历史，A 会改发完整上下文。",
   connection: "无法连接 C 的 A-tether 服务，请检查网络、端口转发（如 SSH 隧道）和 C 端服务（connection error）。",

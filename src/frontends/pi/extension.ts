@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { api, chainOf, defaultUrl, digest, generationOptions, header, heartbeatLost, messages, providerId, type Heartbeat, type WireContext } from "../../shared/protocol.ts";
 import { LinkError, request, errorMessage, type Reply } from "../../client/http.ts";
 import { link } from "../../client/link.ts";
-import { diagnose } from "../../client/doctor.ts";
+import { diagnose, uploadBlocked } from "../../client/doctor.ts";
 import { displayPath, loadSettings } from "../../shared/settings.ts";
 
 // Fire and forget: the reply does not matter. A's pings repeat what these say.
@@ -130,19 +130,42 @@ export const remoteStream: StreamFunction<string, SimpleStreamOptions> = (model,
     // Whether C may drop the turn when A is through with it. Not when A merely gave up
     // waiting: the turn may still finish on C, and Pi's retry then gets it replayed.
     let release = true;
+    // Ends the upload of the request, and nothing after it.
+    const upload = new AbortController();
+    const uploading = signal ? AbortSignal.any([signal, upload.signal]) : upload.signal;
+    let suspect: NodeJS.Timeout | undefined;
+    let blocked = false;
     link.track(id, () => n);
     try {
       let started = false, resynced = false, attempt = 0;
+      const began = Date.now();
       let encoded = encodeContext(context);
       for (;;) {
         const body = started ? undefined : JSON.stringify({model: model.id, options: generationOptions(options), context: encoded.wire});
         // An upload shows no progress to watch, so a large one is given more time: the
         // timeout plus what the body takes at 4 KB/s.
         const patience = started ? timeout : timeout + (body!.length >> 2);
+        if (blocked) throw new Failed(messages.blocked);
+        // An upload that gets no answer while pings do is suspect: a link that drops
+        // large packets passes the one and never the other. A probe of a few packets
+        // settles it, and then waiting out the timeout and retrying would be pointless.
+        // The clock runs across attempts: the system may give each one up before it.
+        if (body && !suspect) {
+          const size = body.length;
+          suspect = setTimeout(async () => {
+            if (started || !(link.lastPong && link.lastPong > began)) return;
+            link.busy({kind: "stuck", since: began});
+            const verdict = await uploadBlocked(upload.signal, Math.round(1.5 * interval)).catch(() => false);
+            if (started || upload.signal.aborted) return;
+            if (!verdict) return link.busy({kind: resynced ? "syncing" : "uploading", bytes: size});
+            blocked = true;
+            upload.abort();
+          }, 3 * interval + (size >> 3));
+        }
         try {
           if (body && body.length > 16 * 1024) link.busy({kind: resynced ? "syncing" : "uploading", bytes: body.length});
           const reply = body
-            ? await request("/v1/turns/" + id, {method: "POST", body, compress: true, signal, timeout: patience})
+            ? await request("/v1/turns/" + id, {method: "POST", body, compress: true, timeout: patience, signal: uploading})
             : await request(`/v1/turns/${id}/events?after=${n}`, {signal, timeout: Math.min(15_000, Math.max(1000, 2.5 * interval))});
           const beat = Number(reply.headers[header.interval]), limit = Number(reply.headers[header.timeout]);
           if (!(beat > 0) || !(limit > beat)) { reply.close(); throw new Failed(messages.malformed); }
@@ -161,6 +184,7 @@ export const remoteStream: StreamFunction<string, SimpleStreamOptions> = (model,
           if (await consume(reply)) return;
         } catch (error) {
           if (signal?.aborted) throw error;
+          if (blocked) continue;
           if (error instanceof LinkError && error.code === "resync" && !resynced) {
             // C lacks the history A built on, after a restart or an eviction: send it all.
             resynced = true;
@@ -181,17 +205,19 @@ export const remoteStream: StreamFunction<string, SimpleStreamOptions> = (model,
             throw error;
           }
           link.busy({kind: "reconnecting", since: heard});
-          await sleep(backoff(attempt++), undefined, {signal});
+          await sleep(backoff(attempt++), undefined, {signal: started ? signal : uploading});
         }
       }
     } catch (error) {
       const reason = signal?.aborted ? "aborted" : "error";
       partial = {...partial, stopReason: reason, errorMessage: signal?.aborted ? messages.cancelled
-        : lost || (error instanceof Error ? error.message : messages.interrupted)};
+        : blocked ? messages.blocked : lost || (error instanceof Error ? error.message : messages.interrupted)};
       stream.push({type:"error", reason, error:partial});
     } finally {
       // Delivered, cancelled or failed: C may drop the turn. The next pings repeat it in
       // case this request does not arrive.
+      clearTimeout(suspect);
+      upload.abort();
       if (release || signal?.aborted) {
         link.release(id);
         discard("/v1/turns/" + id, "DELETE");

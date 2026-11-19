@@ -6,7 +6,7 @@ import { LinkError, request } from "./http.ts";
 
 export type LinkState = "unknown" | "ok" | "unstable" | "down" | "token" | "version" | "login" | "error";
 // What a request is doing, shown instead of the idle state.
-export type Activity = {kind: "uploading" | "syncing"; bytes: number} | {kind: "reconnecting"; since: number};
+export type Activity = {kind: "uploading" | "syncing"; bytes: number} | {kind: "reconnecting" | "stuck"; since: number};
 
 const seconds = (ms: number) => Math.max(0, Math.round(ms / 1000));
 const size = (bytes: number) => bytes < 1024 * 1024 ? Math.max(1, Math.round(bytes / 1024)) + " KB" : (bytes / 1024 / 1024).toFixed(1) + " MB";
@@ -15,8 +15,9 @@ export class Link {
   state: LinkState = "unknown";
   // Round trip of the last ping, in milliseconds.
   rtt?: number;
-  // Since when no ping got through.
+  // Since when no ping got through, and when the last one did.
   downSince?: number;
+  lastPong?: number;
   detail = "";
   // From C: how often to ping, and how long C keeps a turn whose A it does not hear.
   interval = 10_000;
@@ -115,6 +116,7 @@ export class Link {
       for (const id of sent) this.released.delete(id);
       this.tune(Number(reply.headers[header.interval]), Number(reply.headers[header.timeout]));
       this.record(true);
+      this.lastPong = this.now();
       this.downSince = undefined;
       this.detail = "";
       this.state = !pong.loggedIn ? "login" : this.lost >= 2 || this.rtt > 1500 ? "unstable" : "ok";
@@ -153,6 +155,7 @@ export class Link {
     const a = this.activity;
     const head = "A-tether ";
     if (a?.kind === "reconnecting") return head + `◌ 重连中 · 已断开 ${seconds(this.now() - a.since)} 秒，已收到的内容保留`;
+    if (a?.kind === "stuck") return head + `↑ 上传 ${seconds(this.now() - a.since)} 秒没有回应，心跳正常，正在检查链路`;
     if (a?.kind === "uploading") return head + `↑ 上传 ${size(a.bytes)}`;
     if (a?.kind === "syncing") return head + `↑ 同步上下文 ${size(a.bytes)}`;
     switch (this.state) {

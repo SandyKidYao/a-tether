@@ -40,6 +40,11 @@ async function home(t: test.TestContext) {
 // the first connection gets, and what a connection that attaches again gets. Without
 // `events` it has never heard of the turn.
 type Script = {
+  // Awaited before the turn's reply begins; a promise that never settles is a C that
+  // never gets the request.
+  before?(): Promise<void>;
+  // Requests above one small packet never arrive, as on a link that drops large packets.
+  dropLarge?: boolean;
   start(res: ServerResponse, id: string, body: any): void;
   events?(res: ServerResponse, id: string, after: number): void;
 };
@@ -53,9 +58,14 @@ async function fakeC(t: test.TestContext, dir: string, script: Script, base: Rec
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks);
+    if (req.url!.startsWith("/v1/probe")) {
+      if (script.dropLarge && raw.length > 1300) return;
+      return void res.writeHead(200, base).end(Buffer.alloc(Number(new URL(req.url!, "http://c").searchParams.get("reply"))));
+    }
     const text = (req.headers["content-encoding"] === "br" ? brotliDecompressSync(raw) : raw).toString();
     const [, id, events] = /^\/v1\/turns\/([^/?]+)(\/events)?/.exec(req.url ?? "") ?? [];
     if (req.method === "POST" && id && !events) {
+      await script.before?.();
       res.writeHead(200, stream);
       res.flushHeaders();
       return script.start(res, id, JSON.parse(text));
@@ -235,6 +245,33 @@ test("A gives up when C stays unreachable, quotes the last heartbeat and leaves 
   await delay(300);
   // The turn may still finish on C; Pi's retry then gets it instead of a second one.
   assert.ok(!seen.some(s => s.startsWith("DELETE ")), seen.join("\n"));
+});
+
+test("an upload that gets nowhere while pings pass is reported as a link dropping large packets", async t => {
+  const dir = await home(t);
+  const seen = await fakeC(t, dir, {before: () => new Promise(() => {}), dropLarge: true, start() {}});
+  const shown = new Set<string>();
+  t.after(link.onChange(() => shown.add(link.text())));
+  // As in use, the timeout is far longer than the three ping intervals of suspicion.
+  link.timeout = 20_000;
+  const started = Date.now();
+  const final = await remoteStream(model, context, {}).result();
+  assert.equal(final.errorMessage, messages.blocked);
+  assert.ok(!isRetryableAssistantError(final), "the next attempt would be dropped the same way");
+  assert.match(final.errorMessage!, /MTU.*1280.*大包被丢弃/);
+  // Three ping intervals of suspicion and one probe, not the whole timeout.
+  assert.ok(Date.now() - started < 2500, String(Date.now() - started));
+  assert.ok([...shown].some(text => /上传 \d+ 秒没有回应，心跳正常/.test(text)), [...shown].join("\n"));
+  assert.ok(seen.filter(s => s.startsWith("POST /v1/probe")).length >= 1, seen.join("\n"));
+});
+
+test("a slow upload on a link that passes large requests is waited for", async t => {
+  const dir = await home(t);
+  const seen = await fakeC(t, dir, {before: () => delay(1100), start(res) { res.end(done(1, "late but fine")); }});
+  link.timeout = 5000;
+  const final = await remoteStream(model, context, {}).result();
+  assert.equal(final.stopReason, "stop", final.errorMessage);
+  assert.ok(seen.filter(s => s.startsWith("POST /v1/probe")).length >= 2, "it checked, and the larger probe got through");
 });
 
 test("a turn C no longer has is reported as gone", async t => {

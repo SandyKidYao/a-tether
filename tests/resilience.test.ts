@@ -362,6 +362,14 @@ test("S10: the link check tells a link that stalls larger requests from a health
   at.proxy.state.stall = {over: 1300, ms: 2700};
   const stalled = await diagnose();
   assert.match(stalled.lines.join("\n"), /⚠ 上行和下行的 16 KB 请求比小请求慢 .*丢弃大包/);
+  // A sender that never falls back to small packets: larger requests do not arrive at all.
+  at.proxy.state.stall = {over: 1300, ms: 60_000};
+  const began = Date.now();
+  const dead = await diagnose(undefined, 1200);
+  assert.match(dead.lines.join("\n"), /延迟：平均 .*新连接上的小请求：/s);
+  assert.match(dead.lines.join("\n"), /⚠ 上行（A→C）和下行（C→A）：小请求能通，16 KB 的请求 1\.2 秒没有回应。.*MTU 调到 1280/);
+  assert.ok(!dead.lines.join("\n").includes("链路测量中断"));
+  assert.ok(Date.now() - began < 6000, "it does not wait for transfers that cannot arrive");
 });
 
 test("S11: the status line says what the link is doing", () => {
